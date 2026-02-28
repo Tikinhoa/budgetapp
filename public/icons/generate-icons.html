@@ -1,0 +1,25 @@
+<!-- Open this in a browser to generate PNG icons, then save them -->
+<canvas id="c192" width="192" height="192"></canvas>
+<canvas id="c512" width="512" height="512"></canvas>
+<script>
+function draw(id, size) {
+  const c = document.getElementById(id);
+  const ctx = c.getContext('2d');
+  // Background
+  const grad = ctx.createLinearGradient(0, 0, size, size);
+  grad.addColorStop(0, '#10b981');
+  grad.addColorStop(1, '#0d9488');
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.roundRect(0, 0, size, size, size * 0.22);
+  ctx.fill();
+  // Wallet icon
+  ctx.fillStyle = '#ffffff';
+  ctx.font = `bold ${size * 0.45}px -apple-system, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('₿', size/2, size/2);
+}
+draw('c192', 192);
+draw('c512', 512);
+</script>

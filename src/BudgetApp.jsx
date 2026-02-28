@@ -352,6 +352,17 @@ export default function BudgetApp() {
   const monthlyIncome = filteredTx.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
   const monthlyExpense = filteredTx.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
 
+  const dailyData = useMemo(() => {
+    const map = {};
+    filteredTx.forEach((t) => {
+      const key = t.date;
+      if (!map[key]) map[key] = { date: key, income: 0, expense: 0 };
+      if (t.type === "income") map[key].income += t.amount;
+      else map[key].expense += t.amount;
+    });
+    return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
+  }, [filteredTx]);
+
   // ── Handlers ──
   const saveAccount = () => {
     const acc = {
@@ -668,17 +679,6 @@ export default function BudgetApp() {
   const renderStats = () => {
     const totalExp = categoryBreakdown.reduce((s, c) => s + c.total, 0);
     const PIE_COLORS = categoryBreakdown.map((c) => c.color);
-
-    const dailyData = useMemo(() => {
-      const map = {};
-      filteredTx.forEach((t) => {
-        const key = t.date;
-        if (!map[key]) map[key] = { date: key, income: 0, expense: 0 };
-        if (t.type === "income") map[key].income += t.amount;
-        else map[key].expense += t.amount;
-      });
-      return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
-    }, [filteredTx]);
 
     return (
       <div className="space-y-6 animate-fadeIn">

@@ -223,7 +223,7 @@ export default function BudgetApp() {
 
   // ── Form states ──
   const [accForm, setAccForm] = useState({ name: "", type: "bank", currency: "EUR", balance: "" });
-  const [txForm, setTxForm] = useState({ amount: "", category: "", accountId: "", note: "", date: today(), recurring: "none" });
+  const [txForm, setTxForm] = useState({ amount: "", category: "", accountId: "", note: "", date: today(), recurring: "none", currency: "EUR" });
   const fileInputRef = useRef(null);
 
   // ── Load from IndexedDB ──
@@ -395,6 +395,7 @@ export default function BudgetApp() {
       id: uid(),
       type: txType,
       amount: parseFloat(txForm.amount) || 0,
+      currency: txForm.currency || "EUR",
       category: txForm.category || (txType === "expense" ? "other" : "other_income"),
       accountId: txForm.accountId || (accounts[0] && accounts[0].id),
       note: txForm.note,
@@ -407,7 +408,7 @@ export default function BudgetApp() {
     setTransactions(updated);
     persist(accounts, updated);
     setShowAddTx(false);
-    setTxForm({ amount: "", category: "", accountId: "", note: "", date: today(), recurring: "none" });
+    setTxForm({ amount: "", category: "", accountId: "", note: "", date: today(), recurring: "none", currency: "EUR" });
   };
 
   const deleteTx = (id) => {
@@ -603,7 +604,7 @@ export default function BudgetApp() {
                     <p className="text-white/40 text-xs">{tx.note || (acc ? acc.name : "")} · {tx.date}</p>
                   </div>
                   <p className={`font-semibold text-sm ${tx.type === "income" ? "text-emerald-400" : "text-red-400"}`}>
-                    {tx.type === "income" ? "+" : "-"}{fmt(tx.amount, acc?.currency)}
+                    {tx.type === "income" ? "+" : "-"}{fmt(tx.amount, tx.currency || acc?.currency)}
                   </p>
                 </div>
               );
@@ -660,7 +661,7 @@ export default function BudgetApp() {
                   </p>
                 </div>
                 <p className={`font-semibold text-sm ${tx.type === "income" ? "text-emerald-400" : "text-red-400"}`}>
-                  {tx.type === "income" ? "+" : "-"}{fmt(tx.amount, acc?.currency)}
+                  {tx.type === "income" ? "+" : "-"}{fmt(tx.amount, tx.currency || acc?.currency)}
                 </p>
                 <button
                   onClick={() => deleteTx(tx.id)}
@@ -952,15 +953,35 @@ export default function BudgetApp() {
             ]}
           />
 
-          <InputField
-            label="Montant"
-            type="number"
-            step="0.01"
-            placeholder="0.00"
-            value={txForm.amount}
-            onChange={(e) => setTxForm({ ...txForm, amount: e.target.value })}
-            className="text-2xl font-bold"
-          />
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-white/50 uppercase tracking-wider">Montant & Devise</label>
+            <div className="flex gap-2">
+              <input
+                type="number"
+                step="0.01"
+                placeholder="0.00"
+                value={txForm.amount}
+                onChange={(e) => setTxForm({ ...txForm, amount: e.target.value })}
+                className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-2xl font-bold placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition"
+              />
+              <div className="flex bg-white/5 border border-white/10 rounded-xl overflow-hidden">
+                {Object.entries(CURRENCIES).map(([code, symbol]) => (
+                  <button
+                    key={code}
+                    type="button"
+                    onClick={() => setTxForm({ ...txForm, currency: code })}
+                    className={`px-3 py-3 text-sm font-semibold transition ${
+                      txForm.currency === code
+                        ? "bg-emerald-500/20 text-emerald-400"
+                        : "text-white/40 hover:text-white/60 hover:bg-white/5"
+                    }`}
+                  >
+                    {symbol}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
 
           <div className="space-y-1.5">
             <label className="text-xs font-medium text-white/50 uppercase tracking-wider">Catégorie</label>
@@ -985,7 +1006,10 @@ export default function BudgetApp() {
           <SelectField
             label="Compte"
             value={txForm.accountId}
-            onChange={(e) => setTxForm({ ...txForm, accountId: e.target.value })}
+            onChange={(e) => {
+              const acc = accounts.find((a) => a.id === e.target.value);
+              setTxForm({ ...txForm, accountId: e.target.value, currency: acc ? acc.currency : txForm.currency });
+            }}
             options={[
               { value: "", label: "Sélectionner un compte..." },
               ...accounts.map((a) => ({ value: a.id, label: `${a.name} (${a.currency})` })),

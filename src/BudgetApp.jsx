@@ -1,1110 +1,281 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import {
-  Wallet, Plus, Minus, PieChart, Home, Settings, Camera, ArrowUpDown,
-  Trash2, Edit3, Check, X, ChevronDown, ChevronLeft, TrendingUp,
-  TrendingDown, DollarSign, CreditCard, Banknote, PiggyBank,
-  Calendar, Tag, RefreshCw, Upload, Eye, BarChart3, ArrowRight,
-  Clock, Repeat, Search, Filter, ScanLine, Receipt, Globe, Moon, Sun
-} from "lucide-react";
-import {
-  PieChart as RechartsPie, Pie, Cell, ResponsiveContainer,
-  LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, AreaChart, Area,
-  BarChart, Bar
-} from "recharts";
-
-// ─── Constants ───────────────────────────────────────────────────────
-const CURRENCIES = { MUR: "Rs", EUR: "€", USD: "$" };
-const ACCOUNT_TYPES = [
-  { id: "cash", label: "Cash", icon: "Banknote" },
-  { id: "bank", label: "Banque", icon: "CreditCard" },
-  { id: "savings", label: "Épargne", icon: "PiggyBank" },
-  { id: "crypto", label: "Crypto", icon: "Globe" },
-];
-const EXPENSE_CATEGORIES = [
-  { id: "food", label: "Alimentation", emoji: "🍕", color: "#f97316" },
-  { id: "transport", label: "Transport", emoji: "🚗", color: "#3b82f6" },
-  { id: "housing", label: "Logement", emoji: "🏠", color: "#8b5cf6" },
-  { id: "health", label: "Santé", emoji: "💊", color: "#ef4444" },
-  { id: "entertainment", label: "Loisirs", emoji: "🎮", color: "#ec4899" },
-  { id: "shopping", label: "Shopping", emoji: "🛍️", color: "#f59e0b" },
-  { id: "utilities", label: "Factures", emoji: "💡", color: "#6366f1" },
-  { id: "education", label: "Éducation", emoji: "📚", color: "#14b8a6" },
-  { id: "subscriptions", label: "Abonnements", emoji: "📱", color: "#a855f7" },
-  { id: "other", label: "Autre", emoji: "📌", color: "#6b7280" },
-];
-const INCOME_CATEGORIES = [
-  { id: "salary", label: "Salaire", emoji: "💰", color: "#10b981" },
-  { id: "freelance", label: "Freelance", emoji: "💻", color: "#06b6d4" },
-  { id: "investment", label: "Investissement", emoji: "📈", color: "#8b5cf6" },
-  { id: "gift", label: "Cadeau", emoji: "🎁", color: "#f43f5e" },
-  { id: "refund", label: "Remboursement", emoji: "↩️", color: "#64748b" },
-  { id: "other_income", label: "Autre", emoji: "📌", color: "#6b7280" },
-];
-
-const MOCK_RATES = { EUR: 1, USD: 1.08, MUR: 48.5 };
-
-// ─── DB Helper (IndexedDB wrapper) ──────────────────────────────────
-const DB_NAME = "BudgetAppDB";
-const DB_VERSION = 1;
-
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = (e) => {
-      const db = e.target.result;
-      if (!db.objectStoreNames.contains("accounts"))
-        db.createObjectStore("accounts", { keyPath: "id" });
-      if (!db.objectStoreNames.contains("transactions")) {
-        const ts = db.createObjectStore("transactions", { keyPath: "id" });
-        ts.createIndex("date", "date");
-        ts.createIndex("accountId", "accountId");
-      }
-      if (!db.objectStoreNames.contains("settings"))
-        db.createObjectStore("settings", { keyPath: "key" });
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function dbGetAll(store) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readonly");
-    const req = tx.objectStore(store).getAll();
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function dbPut(store, data) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readwrite");
-    tx.objectStore(store).put(data);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function dbDelete(store, key) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readwrite");
-    tx.objectStore(store).delete(key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-// ─── Utility Helpers ─────────────────────────────────────────────────
-const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-const fmt = (amount, currency = "EUR") => {
-  const sym = CURRENCIES[currency] || "€";
-  const abs = Math.abs(amount).toFixed(2);
-  return `${amount < 0 ? "-" : ""}${sym}${abs}`;
-};
-const toEUR = (amount, currency, rates) => amount / (rates[currency] || 1);
-const today = () => new Date().toISOString().split("T")[0];
-const getWeek = (d) => {
-  const date = new Date(d);
-  const start = new Date(date);
-  start.setDate(date.getDate() - date.getDay() + 1);
-  return start.toISOString().split("T")[0];
-};
-
-// ─── Sub-components ──────────────────────────────────────────────────
-function AccountIcon({ type, size = 20 }) {
-  const props = { size, strokeWidth: 1.5 };
-  switch (type) {
-    case "cash": return <Banknote {...props} />;
-    case "savings": return <PiggyBank {...props} />;
-    case "crypto": return <Globe {...props} />;
-    default: return <CreditCard {...props} />;
-  }
-}
-
-function Modal({ open, onClose, title, children }) {
-  if (!open) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div
-        className="relative w-full max-w-lg max-h-[90vh] overflow-y-auto bg-[#1a1d23] border border-white/10 rounded-t-3xl sm:rounded-2xl p-6 pb-8 animate-slideUp"
-        style={{ animation: "slideUp .3s ease-out" }}
-      >
-        <div className="flex items-center justify-between mb-5">
-          <h3 className="text-lg font-semibold text-white">{title}</h3>
-          <button onClick={onClose} className="p-2 rounded-full hover:bg-white/10 text-white/60">
-            <X size={20} />
-          </button>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-function TabBar({ active, onChange, tabs }) {
-  return (
-    <div className="flex bg-white/5 rounded-xl p-1 gap-1">
-      {tabs.map((t) => (
-        <button
-          key={t.id}
-          onClick={() => onChange(t.id)}
-          className={`flex-1 py-2.5 rounded-lg text-sm font-medium transition-all ${
-            active === t.id
-              ? "bg-emerald-500/20 text-emerald-400 shadow-inner"
-              : "text-white/50 hover:text-white/70"
-          }`}
-        >
-          {t.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function InputField({ label, ...props }) {
-  return (
-    <div className="space-y-1.5">
-      {label && <label className="text-xs font-medium text-white/50 uppercase tracking-wider">{label}</label>}
-      <input
-        {...props}
-        className={`w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition ${props.className || ""}`}
-      />
-    </div>
-  );
-}
-
-function SelectField({ label, options, ...props }) {
-  return (
-    <div className="space-y-1.5">
-      {label && <label className="text-xs font-medium text-white/50 uppercase tracking-wider">{label}</label>}
-      <select
-        {...props}
-        className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-emerald-500/50 appearance-none transition"
-      >
-        {options.map((o) => (
-          <option key={o.value} value={o.value} className="bg-[#1a1d23]">{o.label}</option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
-function Btn({ children, variant = "primary", className = "", ...props }) {
-  const base = "flex items-center justify-center gap-2 font-semibold rounded-xl px-5 py-3.5 transition-all active:scale-[0.97] disabled:opacity-40 text-sm";
-  const variants = {
-    primary: "bg-emerald-500 text-white hover:bg-emerald-400 shadow-lg shadow-emerald-500/25",
-    secondary: "bg-white/10 text-white hover:bg-white/15",
-    danger: "bg-red-500/20 text-red-400 hover:bg-red-500/30",
-    ghost: "text-white/60 hover:text-white hover:bg-white/5",
-  };
-  return <button className={`${base} ${variants[variant]} ${className}`} {...props}>{children}</button>;
-}
-
-// ─── MAIN APP ────────────────────────────────────────────────────────
-export default function BudgetApp() {
-  // ── State ──
-  const [page, setPage] = useState("home");
-  const [accounts, setAccounts] = useState([]);
-  const [transactions, setTransactions] = useState([]);
-  const [rates, setRates] = useState(MOCK_RATES);
-  const [showAddAccount, setShowAddAccount] = useState(false);
-  const [editAccount, setEditAccount] = useState(null);
-  const [showAddTx, setShowAddTx] = useState(false);
-  const [txType, setTxType] = useState("expense");
-  const [showScan, setShowScan] = useState(false);
-  const [scanResult, setScanResult] = useState(null);
-  const [scanning, setScanning] = useState(false);
-  const [statsPeriod, setStatsPeriod] = useState("month");
-  const [loaded, setLoaded] = useState(false);
-
-  // ── Form states ──
-  const [accForm, setAccForm] = useState({ name: "", type: "bank", currency: "EUR", balance: "" });
-  const [txForm, setTxForm] = useState({ amount: "", category: "", accountId: "", note: "", date: today(), recurring: "none", currency: "EUR" });
-  const fileInputRef = useRef(null);
-
-  // ── Load from IndexedDB ──
-  useEffect(() => {
-    (async () => {
-      try {
-        const [accs, txs] = await Promise.all([dbGetAll("accounts"), dbGetAll("transactions")]);
-        setAccounts(accs || []);
-        setTransactions(txs || []);
-      } catch {
-        const accs = JSON.parse(localStorage.getItem("ba_accounts") || "[]");
-        const txs = JSON.parse(localStorage.getItem("ba_transactions") || "[]");
-        setAccounts(accs);
-        setTransactions(txs);
-      }
-      setLoaded(true);
-    })();
-  }, []);
-
-  // ── Persist ──
-  const persist = useCallback(async (accs, txs) => {
-    try {
-      for (const a of accs) await dbPut("accounts", a);
-      for (const t of txs) await dbPut("transactions", t);
-    } catch {
-      localStorage.setItem("ba_accounts", JSON.stringify(accs));
-      localStorage.setItem("ba_transactions", JSON.stringify(txs));
-    }
-  }, []);
-
-  // ── Fetch live rates ──
-  useEffect(() => {
-    fetch("https://api.exchangerate-api.com/v4/latest/EUR")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.rates) setRates({ EUR: 1, USD: d.rates.USD || 1.08, MUR: d.rates.MUR || 48.5 });
-      })
-      .catch(() => {});
-  }, []);
-
-  // ── Process recurring transactions ──
-  useEffect(() => {
-    if (!loaded) return;
-    const now = new Date();
-    const newTxs = [];
-    transactions.forEach((tx) => {
-      if (tx.recurring && tx.recurring !== "none") {
-        const lastDate = new Date(tx.date);
-        let nextDate = new Date(lastDate);
-        if (tx.recurring === "weekly") nextDate.setDate(nextDate.getDate() + 7);
-        else if (tx.recurring === "monthly") nextDate.setMonth(nextDate.getMonth() + 1);
-        while (nextDate <= now) {
-          const exists = transactions.find(
-            (t) => t.recurringParent === tx.id && t.date === nextDate.toISOString().split("T")[0]
-          );
-          if (!exists) {
-            newTxs.push({
-              ...tx,
-              id: uid(),
-              date: nextDate.toISOString().split("T")[0],
-              recurringParent: tx.id,
-              recurring: "none",
-            });
-          }
-          if (tx.recurring === "weekly") nextDate.setDate(nextDate.getDate() + 7);
-          else nextDate.setMonth(nextDate.getMonth() + 1);
-        }
-      }
-    });
-    if (newTxs.length > 0) {
-      const updated = [...transactions, ...newTxs];
-      setTransactions(updated);
-      persist(accounts, updated);
-    }
-  }, [loaded]);
-
-  // ── Computed values ──
-  const totalEUR = useMemo(() => {
-    return accounts.reduce((sum, acc) => {
-      const accTxs = transactions.filter((t) => t.accountId === acc.id);
-      const balance = accTxs.reduce((s, t) => s + (t.type === "income" ? t.amount : -t.amount), parseFloat(acc.initialBalance || 0));
-      return sum + toEUR(balance, acc.currency, rates);
-    }, 0);
-  }, [accounts, transactions, rates]);
-
-  const getAccountBalance = (acc) => {
-    const accTxs = transactions.filter((t) => t.accountId === acc.id);
-    return accTxs.reduce((s, t) => s + (t.type === "income" ? t.amount : -t.amount), parseFloat(acc.initialBalance || 0));
-  };
-
-  const filteredTx = useMemo(() => {
-    const now = new Date();
-    const start = new Date();
-    if (statsPeriod === "day") start.setHours(0, 0, 0, 0);
-    else if (statsPeriod === "week") start.setDate(now.getDate() - 7);
-    else start.setMonth(now.getMonth() - 1);
-    return transactions.filter((t) => new Date(t.date) >= start && new Date(t.date) <= now);
-  }, [transactions, statsPeriod]);
-
-  const categoryBreakdown = useMemo(() => {
-    const map = {};
-    filteredTx
-      .filter((t) => t.type === "expense")
-      .forEach((t) => {
-        const cat = EXPENSE_CATEGORIES.find((c) => c.id === t.category) || EXPENSE_CATEGORIES[9];
-        map[cat.id] = map[cat.id] || { ...cat, total: 0 };
-        map[cat.id].total += t.amount;
-      });
-    return Object.values(map).sort((a, b) => b.total - a.total);
-  }, [filteredTx]);
-
-  const balanceOverTime = useMemo(() => {
-    const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
-    let running = accounts.reduce((s, a) => s + toEUR(parseFloat(a.initialBalance || 0), a.currency, rates), 0);
-    const points = [];
-    sorted.forEach((t) => {
-      const acc = accounts.find((a) => a.id === t.accountId);
-      const cur = acc ? acc.currency : "EUR";
-      const eurAmt = toEUR(t.amount, cur, rates);
-      running += t.type === "income" ? eurAmt : -eurAmt;
-      points.push({ date: t.date, balance: Math.round(running * 100) / 100 });
-    });
-    return points.slice(-30);
-  }, [transactions, accounts, rates]);
-
-  const monthlyIncome = filteredTx.filter((t) => t.type === "income").reduce((s, t) => s + t.amount, 0);
-  const monthlyExpense = filteredTx.filter((t) => t.type === "expense").reduce((s, t) => s + t.amount, 0);
-
-  const dailyData = useMemo(() => {
-    const map = {};
-    filteredTx.forEach((t) => {
-      const key = t.date;
-      if (!map[key]) map[key] = { date: key, income: 0, expense: 0 };
-      if (t.type === "income") map[key].income += t.amount;
-      else map[key].expense += t.amount;
-    });
-    return Object.values(map).sort((a, b) => a.date.localeCompare(b.date));
-  }, [filteredTx]);
-
-  // ── Handlers ──
-  const saveAccount = () => {
-    const acc = {
-      id: editAccount ? editAccount.id : uid(),
-      name: accForm.name || "Mon Compte",
-      type: accForm.type,
-      currency: accForm.currency,
-      initialBalance: parseFloat(accForm.balance) || 0,
-      createdAt: editAccount ? editAccount.createdAt : new Date().toISOString(),
-    };
-    const updated = editAccount ? accounts.map((a) => (a.id === acc.id ? acc : a)) : [...accounts, acc];
-    setAccounts(updated);
-    persist(updated, transactions);
-    setShowAddAccount(false);
-    setEditAccount(null);
-    setAccForm({ name: "", type: "bank", currency: "EUR", balance: "" });
-  };
-
-  const deleteAccount = (id) => {
-    const updated = accounts.filter((a) => a.id !== id);
-    const updTx = transactions.filter((t) => t.accountId !== id);
-    setAccounts(updated);
-    setTransactions(updTx);
-    persist(updated, updTx);
-    dbDelete("accounts", id).catch(() => {});
-  };
-
-  const saveTx = () => {
-    const tx = {
-      id: uid(),
-      type: txType,
-      amount: parseFloat(txForm.amount) || 0,
-      currency: txForm.currency || "EUR",
-      category: txForm.category || (txType === "expense" ? "other" : "other_income"),
-      accountId: txForm.accountId || (accounts[0] && accounts[0].id),
-      note: txForm.note,
-      date: txForm.date || today(),
-      recurring: txForm.recurring || "none",
-      createdAt: new Date().toISOString(),
-    };
-    if (tx.amount <= 0) return;
-    const updated = [...transactions, tx];
-    setTransactions(updated);
-    persist(accounts, updated);
-    setShowAddTx(false);
-    setTxForm({ amount: "", category: "", accountId: "", note: "", date: today(), recurring: "none", currency: "EUR" });
-  };
-
-  const deleteTx = (id) => {
-    const updated = transactions.filter((t) => t.id !== id);
-    setTransactions(updated);
-    persist(accounts, updated);
-    dbDelete("transactions", id).catch(() => {});
-  };
-
-  // ── OCR scan ──
-  const handleScan = async (file) => {
-    if (!file) return;
-    setScanning(true);
-    try {
-      const text = await new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onload = async (e) => {
-          try {
-            const Tesseract = await import("https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.esm.min.js");
-            const { data } = await Tesseract.recognize(e.target.result, "fra+eng");
-            resolve(data.text);
-          } catch {
-            resolve(extractFromImage(e.target.result));
-          }
-        };
-        reader.readAsDataURL(file);
-      });
-      const amounts = text.match(/(\d+[.,]\d{2})/g);
-      const dates = text.match(/(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/g);
-      const amount = amounts ? Math.max(...amounts.map((a) => parseFloat(a.replace(",", ".")))) : 0;
-      let date = today();
-      if (dates && dates[0]) {
-        const parts = dates[0].split(/[\/\-\.]/);
-        if (parts.length === 3) {
-          const y = parts[2].length === 2 ? "20" + parts[2] : parts[2];
-          date = `${y}-${parts[1].padStart(2, "0")}-${parts[0].padStart(2, "0")}`;
-        }
-      }
-      setScanResult({ amount: amount.toFixed(2), date, rawText: text });
-      setTxForm((f) => ({ ...f, amount: amount.toFixed(2), date }));
-    } catch (err) {
-      setScanResult({ amount: "0.00", date: today(), rawText: "Erreur OCR: " + err.message });
-    }
-    setScanning(false);
-  };
-
-  function extractFromImage(dataUrl) {
-    return "OCR non disponible - veuillez entrer le montant manuellement";
-  }
-
-  // ── Recent transactions ──
-  const recentTx = [...transactions].sort((a, b) => b.date.localeCompare(a.date) || b.createdAt?.localeCompare(a.createdAt)).slice(0, 20);
-
-  // ── PAGES ──
-  const renderHome = () => (
-    <div className="space-y-6 animate-fadeIn">
-      {/* Total Balance Card */}
-      <div className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-emerald-600 via-emerald-500 to-teal-400 p-6 shadow-2xl shadow-emerald-500/20">
-        <div className="absolute top-0 right-0 w-40 h-40 bg-white/10 rounded-full -translate-y-1/2 translate-x-1/2" />
-        <div className="absolute bottom-0 left-0 w-24 h-24 bg-white/5 rounded-full translate-y-1/2 -translate-x-1/2" />
-        <p className="text-emerald-100 text-sm font-medium mb-1">Solde Total en EUR</p>
-        <p className="text-4xl font-bold text-white tracking-tight">€{totalEUR.toFixed(2)}</p>
-        <div className="flex gap-6 mt-4">
-          <div>
-            <p className="text-emerald-100 text-xs">Revenus</p>
-            <p className="text-white font-semibold flex items-center gap-1">
-              <TrendingUp size={14} /> €{toEUR(monthlyIncome, "EUR", rates).toFixed(0)}
-            </p>
-          </div>
-          <div>
-            <p className="text-emerald-100 text-xs">Dépenses</p>
-            <p className="text-white font-semibold flex items-center gap-1">
-              <TrendingDown size={14} /> €{toEUR(monthlyExpense, "EUR", rates).toFixed(0)}
-            </p>
-          </div>
-        </div>
-      </div>
-
-      {/* Quick Actions */}
-      <div className="grid grid-cols-3 gap-3">
-        <button
-          onClick={() => { setTxType("expense"); setShowAddTx(true); }}
-          className="flex flex-col items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl p-4 transition active:scale-95"
-        >
-          <div className="w-11 h-11 rounded-full bg-red-500/20 flex items-center justify-center">
-            <Minus size={20} className="text-red-400" />
-          </div>
-          <span className="text-xs text-white/70 font-medium">Dépense</span>
-        </button>
-        <button
-          onClick={() => { setTxType("income"); setShowAddTx(true); }}
-          className="flex flex-col items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl p-4 transition active:scale-95"
-        >
-          <div className="w-11 h-11 rounded-full bg-emerald-500/20 flex items-center justify-center">
-            <Plus size={20} className="text-emerald-400" />
-          </div>
-          <span className="text-xs text-white/70 font-medium">Revenu</span>
-        </button>
-        <button
-          onClick={() => setShowScan(true)}
-          className="flex flex-col items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-2xl p-4 transition active:scale-95"
-        >
-          <div className="w-11 h-11 rounded-full bg-blue-500/20 flex items-center justify-center">
-            <Camera size={20} className="text-blue-400" />
-          </div>
-          <span className="text-xs text-white/70 font-medium">Scanner</span>
-        </button>
-      </div>
-
-      {/* Accounts */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-white font-semibold">Mes Comptes</h2>
-          <button onClick={() => { setAccForm({ name: "", type: "bank", currency: "EUR", balance: "" }); setEditAccount(null); setShowAddAccount(true); }} className="text-emerald-400 text-sm font-medium flex items-center gap-1">
-            <Plus size={16} /> Ajouter
-          </button>
-        </div>
-        {accounts.length === 0 ? (
-          <div className="text-center py-8 bg-white/5 rounded-2xl border border-dashed border-white/10">
-            <Wallet size={32} className="mx-auto text-white/20 mb-2" />
-            <p className="text-white/40 text-sm">Aucun compte. Ajoutez votre premier compte.</p>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {accounts.map((acc) => {
-              const bal = getAccountBalance(acc);
-              return (
-                <div key={acc.id} className="flex items-center gap-3 bg-white/5 border border-white/10 rounded-2xl p-4 hover:bg-white/[0.07] transition">
-                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${
-                    acc.type === "cash" ? "bg-amber-500/20 text-amber-400" :
-                    acc.type === "savings" ? "bg-purple-500/20 text-purple-400" :
-                    acc.type === "crypto" ? "bg-blue-500/20 text-blue-400" :
-                    "bg-emerald-500/20 text-emerald-400"
-                  }`}>
-                    <AccountIcon type={acc.type} />
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-white font-medium text-sm truncate">{acc.name}</p>
-                    <p className="text-white/40 text-xs">{ACCOUNT_TYPES.find((t) => t.id === acc.type)?.label} · {acc.currency}</p>
-                  </div>
-                  <div className="text-right">
-                    <p className={`font-semibold text-sm ${bal >= 0 ? "text-emerald-400" : "text-red-400"}`}>
-                      {fmt(bal, acc.currency)}
-                    </p>
-                    <p className="text-white/30 text-xs">≈ €{toEUR(bal, acc.currency, rates).toFixed(2)}</p>
-                  </div>
-                  <div className="flex gap-1 ml-1">
-                    <button
-                      onClick={() => {
-                        setEditAccount(acc);
-                        setAccForm({ name: acc.name, type: acc.type, currency: acc.currency, balance: String(acc.initialBalance) });
-                        setShowAddAccount(true);
-                      }}
-                      className="p-1.5 rounded-lg hover:bg-white/10 text-white/40"
-                    >
-                      <Edit3 size={14} />
-                    </button>
-                    <button onClick={() => deleteAccount(acc.id)} className="p-1.5 rounded-lg hover:bg-red-500/20 text-white/40 hover:text-red-400">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-
-      {/* Recent Transactions */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-white font-semibold">Dernières Transactions</h2>
-          <button onClick={() => setPage("transactions")} className="text-emerald-400 text-sm font-medium">Tout voir →</button>
-        </div>
-        {recentTx.length === 0 ? (
-          <div className="text-center py-6 bg-white/5 rounded-2xl border border-dashed border-white/10">
-            <Receipt size={28} className="mx-auto text-white/20 mb-2" />
-            <p className="text-white/40 text-sm">Aucune transaction</p>
-          </div>
-        ) : (
-          <div className="space-y-2">
-            {recentTx.slice(0, 5).map((tx) => {
-              const cats = tx.type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
-              const cat = cats.find((c) => c.id === tx.category) || cats[cats.length - 1];
-              const acc = accounts.find((a) => a.id === tx.accountId);
-              return (
-                <div key={tx.id} className="flex items-center gap-3 bg-white/5 border border-white/10 rounded-2xl p-3.5 transition">
-                  <div className="w-10 h-10 rounded-xl flex items-center justify-center text-lg" style={{ backgroundColor: cat.color + "20" }}>
-                    {cat.emoji}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-white font-medium text-sm truncate">{cat.label}</p>
-                    <p className="text-white/40 text-xs">{tx.note || (acc ? acc.name : "")} · {tx.date}</p>
-                  </div>
-                  <p className={`font-semibold text-sm ${tx.type === "income" ? "text-emerald-400" : "text-red-400"}`}>
-                    {tx.type === "income" ? "+" : "-"}{fmt(tx.amount, tx.currency || acc?.currency)}
-                  </p>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-
-  const renderTransactions = () => (
-    <div className="space-y-4 animate-fadeIn">
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-bold text-white">Transactions</h2>
-        <div className="flex gap-2">
-          <button
-            onClick={() => { setTxType("expense"); setShowAddTx(true); }}
-            className="p-2.5 rounded-xl bg-red-500/20 text-red-400 hover:bg-red-500/30 transition"
-          >
-            <Minus size={18} />
-          </button>
-          <button
-            onClick={() => { setTxType("income"); setShowAddTx(true); }}
-            className="p-2.5 rounded-xl bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30 transition"
-          >
-            <Plus size={18} />
-          </button>
-        </div>
-      </div>
-
-      {recentTx.length === 0 ? (
-        <div className="text-center py-12 bg-white/5 rounded-2xl border border-dashed border-white/10">
-          <ArrowUpDown size={40} className="mx-auto text-white/15 mb-3" />
-          <p className="text-white/40">Aucune transaction enregistrée</p>
-        </div>
-      ) : (
-        <div className="space-y-2">
-          {recentTx.map((tx) => {
-            const cats = tx.type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES;
-            const cat = cats.find((c) => c.id === tx.category) || cats[cats.length - 1];
-            const acc = accounts.find((a) => a.id === tx.accountId);
-            return (
-              <div key={tx.id} className="flex items-center gap-3 bg-white/5 border border-white/10 rounded-2xl p-3.5 group">
-                <div className="w-10 h-10 rounded-xl flex items-center justify-center text-lg" style={{ backgroundColor: cat.color + "20" }}>
-                  {cat.emoji}
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-white font-medium text-sm truncate">{cat.label}</p>
-                  <p className="text-white/40 text-xs">
-                    {tx.note ? tx.note + " · " : ""}{acc ? acc.name : ""} · {tx.date}
-                    {tx.recurring && tx.recurring !== "none" && (
-                      <span className="ml-1 text-blue-400"><Repeat size={10} className="inline" /> {tx.recurring === "weekly" ? "Hebdo" : "Mensuel"}</span>
-                    )}
-                  </p>
-                </div>
-                <p className={`font-semibold text-sm ${tx.type === "income" ? "text-emerald-400" : "text-red-400"}`}>
-                  {tx.type === "income" ? "+" : "-"}{fmt(tx.amount, tx.currency || acc?.currency)}
-                </p>
-                <button
-                  onClick={() => deleteTx(tx.id)}
-                  className="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 hover:bg-red-500/20 text-white/30 hover:text-red-400 transition"
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
-  );
-
-  const renderStats = () => {
-    const totalExp = categoryBreakdown.reduce((s, c) => s + c.total, 0);
-    const PIE_COLORS = categoryBreakdown.map((c) => c.color);
-
-    return (
-      <div className="space-y-6 animate-fadeIn">
-        <h2 className="text-xl font-bold text-white">Statistiques</h2>
-
-        <TabBar
-          active={statsPeriod}
-          onChange={setStatsPeriod}
-          tabs={[
-            { id: "day", label: "Jour" },
-            { id: "week", label: "Semaine" },
-            { id: "month", label: "Mois" },
-          ]}
-        />
-
-        {/* Summary Cards */}
-        <div className="grid grid-cols-2 gap-3">
-          <div className="bg-emerald-500/10 border border-emerald-500/20 rounded-2xl p-4">
-            <p className="text-emerald-400 text-xs font-medium mb-1">Revenus</p>
-            <p className="text-emerald-300 text-xl font-bold">€{monthlyIncome.toFixed(0)}</p>
-          </div>
-          <div className="bg-red-500/10 border border-red-500/20 rounded-2xl p-4">
-            <p className="text-red-400 text-xs font-medium mb-1">Dépenses</p>
-            <p className="text-red-300 text-xl font-bold">€{monthlyExpense.toFixed(0)}</p>
-          </div>
-        </div>
-
-        {/* Pie Chart */}
-        {categoryBreakdown.length > 0 && (
-          <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
-            <h3 className="text-white font-semibold mb-4">Répartition des Dépenses</h3>
-            <div style={{ height: 220 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <RechartsPie>
-                  <Pie
-                    data={categoryBreakdown}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={55}
-                    outerRadius={90}
-                    paddingAngle={3}
-                    dataKey="total"
-                    nameKey="label"
-                    stroke="none"
-                  >
-                    {categoryBreakdown.map((entry, i) => (
-                      <Cell key={i} fill={PIE_COLORS[i]} />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    contentStyle={{ background: "#1a1d23", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, color: "#fff", fontSize: 13 }}
-                    formatter={(val) => [`€${val.toFixed(2)}`, ""]}
-                  />
-                </RechartsPie>
-              </ResponsiveContainer>
-            </div>
-            <div className="space-y-2 mt-4">
-              {categoryBreakdown.map((cat) => (
-                <div key={cat.id} className="flex items-center gap-3">
-                  <span className="text-base">{cat.emoji}</span>
-                  <span className="text-white/70 text-sm flex-1">{cat.label}</span>
-                  <span className="text-white text-sm font-medium">€{cat.total.toFixed(2)}</span>
-                  <span className="text-white/40 text-xs w-10 text-right">{totalExp > 0 ? ((cat.total / totalExp) * 100).toFixed(0) : 0}%</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Balance Evolution */}
-        {balanceOverTime.length > 1 && (
-          <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
-            <h3 className="text-white font-semibold mb-4">Évolution du Solde</h3>
-            <div style={{ height: 200 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={balanceOverTime}>
-                  <defs>
-                    <linearGradient id="balGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#10b981" stopOpacity={0.3} />
-                      <stop offset="100%" stopColor="#10b981" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-                  <XAxis dataKey="date" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10 }} tickFormatter={(d) => d.slice(5)} />
-                  <YAxis tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10 }} />
-                  <Tooltip
-                    contentStyle={{ background: "#1a1d23", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, color: "#fff", fontSize: 13 }}
-                    formatter={(val) => [`€${val}`, "Solde"]}
-                  />
-                  <Area type="monotone" dataKey="balance" stroke="#10b981" strokeWidth={2} fill="url(#balGrad)" />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        )}
-
-        {/* Daily Bar Chart */}
-        {dailyData.length > 0 && (
-          <div className="bg-white/5 border border-white/10 rounded-2xl p-5">
-            <h3 className="text-white font-semibold mb-4">Revenus vs Dépenses</h3>
-            <div style={{ height: 200 }}>
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={dailyData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-                  <XAxis dataKey="date" tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10 }} tickFormatter={(d) => d.slice(5)} />
-                  <YAxis tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10 }} />
-                  <Tooltip
-                    contentStyle={{ background: "#1a1d23", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 12, color: "#fff", fontSize: 13 }}
-                  />
-                  <Bar dataKey="income" fill="#10b981" radius={[4, 4, 0, 0]} name="Revenus" />
-                  <Bar dataKey="expense" fill="#ef4444" radius={[4, 4, 0, 0]} name="Dépenses" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  };
-
-  const renderSettings = () => (
-    <div className="space-y-6 animate-fadeIn">
-      <h2 className="text-xl font-bold text-white">Paramètres</h2>
-      <div className="bg-white/5 border border-white/10 rounded-2xl divide-y divide-white/5">
-        <div className="p-4 flex items-center justify-between">
-          <div>
-            <p className="text-white font-medium text-sm">Taux de change</p>
-            <p className="text-white/40 text-xs mt-0.5">Dernière mise à jour automatique</p>
-          </div>
-          <RefreshCw size={18} className="text-white/40" />
-        </div>
-        <div className="p-4">
-          <p className="text-white/40 text-xs mb-2">Taux actuels (base EUR)</p>
-          <div className="flex gap-4">
-            <span className="text-white text-sm">1 € = {rates.USD?.toFixed(2)} $</span>
-            <span className="text-white text-sm">1 € = {rates.MUR?.toFixed(2)} Rs</span>
-          </div>
-        </div>
-        <div className="p-4 flex items-center justify-between">
-          <div>
-            <p className="text-white font-medium text-sm">Comptes</p>
-            <p className="text-white/40 text-xs mt-0.5">{accounts.length} compte{accounts.length !== 1 ? "s" : ""} configuré{accounts.length !== 1 ? "s" : ""}</p>
-          </div>
-        </div>
-        <div className="p-4 flex items-center justify-between">
-          <div>
-            <p className="text-white font-medium text-sm">Transactions</p>
-            <p className="text-white/40 text-xs mt-0.5">{transactions.length} transaction{transactions.length !== 1 ? "s" : ""}</p>
-          </div>
-        </div>
-        <div className="p-4">
-          <Btn
-            variant="danger"
-            className="w-full"
-            onClick={() => {
-              if (confirm("Supprimer toutes les données ? Cette action est irréversible.")) {
-                setAccounts([]);
-                setTransactions([]);
-                indexedDB.deleteDatabase(DB_NAME);
-                localStorage.removeItem("ba_accounts");
-                localStorage.removeItem("ba_transactions");
-              }
-            }}
-          >
-            <Trash2 size={16} /> Réinitialiser toutes les données
-          </Btn>
-        </div>
-      </div>
-      <div className="bg-white/5 border border-white/10 rounded-2xl p-4 text-center">
-        <p className="text-white/30 text-xs">BudgetApp v1.0</p>
-        <p className="text-white/20 text-xs mt-1">PWA · Données stockées localement</p>
-      </div>
-    </div>
-  );
-
-  // ── Layout ──
-  return (
-    <div className="min-h-screen bg-[#0f1117] text-white" style={{ fontFamily: "'DM Sans', 'SF Pro Display', -apple-system, sans-serif" }}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&display=swap');
-        @keyframes slideUp { from { transform: translateY(100%); opacity: 0 } to { transform: translateY(0); opacity: 1 } }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: translateY(0) } }
-        .animate-fadeIn { animation: fadeIn .35s ease-out }
-        * { -webkit-tap-highlight-color: transparent; }
-        ::-webkit-scrollbar { width: 0; height: 0; }
-        input[type=number]::-webkit-inner-spin-button,
-        input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
-        select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.4)' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 14px center; }
-      `}</style>
-
-      {/* Header */}
-      <header className="sticky top-0 z-30 bg-[#0f1117]/80 backdrop-blur-xl border-b border-white/5 px-5 pt-3 pb-3">
-        <div className="flex items-center justify-between max-w-lg mx-auto">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-400 flex items-center justify-center shadow-lg shadow-emerald-500/20">
-              <Wallet size={16} className="text-white" />
-            </div>
-            <span className="font-bold text-lg tracking-tight">BudgetApp</span>
-          </div>
-          <div className="text-white/40 text-xs">
-            {new Date().toLocaleDateString("fr-FR", { weekday: "short", day: "numeric", month: "short" })}
-          </div>
-        </div>
-      </header>
-
-      {/* Content */}
-      <main className="max-w-lg mx-auto px-5 py-5 pb-28">
-        {page === "home" && renderHome()}
-        {page === "transactions" && renderTransactions()}
-        {page === "stats" && renderStats()}
-        {page === "settings" && renderSettings()}
-      </main>
-
-      {/* Bottom Nav */}
-      <nav className="fixed bottom-0 left-0 right-0 z-30 bg-[#0f1117]/90 backdrop-blur-xl border-t border-white/5 pb-[env(safe-area-inset-bottom)]">
-        <div className="flex max-w-lg mx-auto">
-          {[
-            { id: "home", icon: Home, label: "Accueil" },
-            { id: "transactions", icon: ArrowUpDown, label: "Transactions" },
-            { id: "stats", icon: BarChart3, label: "Stats" },
-            { id: "settings", icon: Settings, label: "Réglages" },
-          ].map((item) => (
-            <button
-              key={item.id}
-              onClick={() => setPage(item.id)}
-              className={`flex-1 flex flex-col items-center gap-1 py-3 transition ${
-                page === item.id ? "text-emerald-400" : "text-white/30"
-              }`}
-            >
-              <item.icon size={22} strokeWidth={page === item.id ? 2 : 1.5} />
-              <span className="text-[10px] font-medium">{item.label}</span>
-            </button>
-          ))}
-        </div>
-      </nav>
-
-      {/* ── MODALS ── */}
-
-      {/* Add/Edit Account Modal */}
-      <Modal open={showAddAccount} onClose={() => { setShowAddAccount(false); setEditAccount(null); }} title={editAccount ? "Modifier le Compte" : "Nouveau Compte"}>
-        <div className="space-y-4">
-          <InputField label="Nom du compte" placeholder="Ex: Compte courant" value={accForm.name} onChange={(e) => setAccForm({ ...accForm, name: e.target.value })} />
-          <SelectField
-            label="Type de compte"
-            value={accForm.type}
-            onChange={(e) => setAccForm({ ...accForm, type: e.target.value })}
-            options={ACCOUNT_TYPES.map((t) => ({ value: t.id, label: t.label }))}
-          />
-          <SelectField
-            label="Devise"
-            value={accForm.currency}
-            onChange={(e) => setAccForm({ ...accForm, currency: e.target.value })}
-            options={Object.entries(CURRENCIES).map(([k, v]) => ({ value: k, label: `${k} (${v})` }))}
-          />
-          <InputField label="Solde initial" type="number" step="0.01" placeholder="0.00" value={accForm.balance} onChange={(e) => setAccForm({ ...accForm, balance: e.target.value })} />
-          <Btn onClick={saveAccount} className="w-full mt-2">
-            <Check size={18} /> {editAccount ? "Enregistrer" : "Créer le Compte"}
-          </Btn>
-        </div>
-      </Modal>
-
-      {/* Add Transaction Modal */}
-      <Modal open={showAddTx} onClose={() => { setShowAddTx(false); setScanResult(null); }} title={txType === "income" ? "Nouveau Revenu" : "Nouvelle Dépense"}>
-        <div className="space-y-4">
-          <TabBar
-            active={txType}
-            onChange={setTxType}
-            tabs={[
-              { id: "expense", label: "Dépense" },
-              { id: "income", label: "Revenu" },
-            ]}
-          />
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-white/50 uppercase tracking-wider">Montant & Devise</label>
-            <div className="flex gap-2">
-              <input
-                type="number"
-                step="0.01"
-                placeholder="0.00"
-                value={txForm.amount}
-                onChange={(e) => setTxForm({ ...txForm, amount: e.target.value })}
-                className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-white text-2xl font-bold placeholder:text-white/30 focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/20 transition"
-              />
-              <div className="flex bg-white/5 border border-white/10 rounded-xl overflow-hidden">
-                {Object.entries(CURRENCIES).map(([code, symbol]) => (
-                  <button
-                    key={code}
-                    type="button"
-                    onClick={() => setTxForm({ ...txForm, currency: code })}
-                    className={`px-3 py-3 text-sm font-semibold transition ${
-                      txForm.currency === code
-                        ? "bg-emerald-500/20 text-emerald-400"
-                        : "text-white/40 hover:text-white/60 hover:bg-white/5"
-                    }`}
-                  >
-                    {symbol}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-1.5">
-            <label className="text-xs font-medium text-white/50 uppercase tracking-wider">Catégorie</label>
-            <div className="grid grid-cols-5 gap-2">
-              {(txType === "expense" ? EXPENSE_CATEGORIES : INCOME_CATEGORIES).map((cat) => (
-                <button
-                  key={cat.id}
-                  onClick={() => setTxForm({ ...txForm, category: cat.id })}
-                  className={`flex flex-col items-center gap-1 p-2.5 rounded-xl border transition text-center ${
-                    txForm.category === cat.id
-                      ? "border-emerald-500/50 bg-emerald-500/10"
-                      : "border-white/10 bg-white/5 hover:bg-white/10"
-                  }`}
-                >
-                  <span className="text-lg">{cat.emoji}</span>
-                  <span className="text-[9px] text-white/60 leading-tight">{cat.label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <SelectField
-            label="Compte"
-            value={txForm.accountId}
-            onChange={(e) => {
-              const acc = accounts.find((a) => a.id === e.target.value);
-              setTxForm({ ...txForm, accountId: e.target.value, currency: acc ? acc.currency : txForm.currency });
-            }}
-            options={[
-              { value: "", label: "Sélectionner un compte..." },
-              ...accounts.map((a) => ({ value: a.id, label: `${a.name} (${a.currency})` })),
-            ]}
-          />
-
-          <InputField label="Date" type="date" value={txForm.date} onChange={(e) => setTxForm({ ...txForm, date: e.target.value })} />
-
-          <InputField label="Note (optionnel)" placeholder="Ajouter une note..." value={txForm.note} onChange={(e) => setTxForm({ ...txForm, note: e.target.value })} />
-
-          <SelectField
-            label="Récurrence"
-            value={txForm.recurring}
-            onChange={(e) => setTxForm({ ...txForm, recurring: e.target.value })}
-            options={[
-              { value: "none", label: "Aucune" },
-              { value: "weekly", label: "Hebdomadaire" },
-              { value: "monthly", label: "Mensuelle" },
-            ]}
-          />
-
-          <Btn onClick={saveTx} className="w-full mt-2" disabled={!txForm.amount || !txForm.accountId}>
-            <Check size={18} /> Enregistrer
-          </Btn>
-        </div>
-      </Modal>
-
-      {/* Scan Receipt Modal */}
-      <Modal open={showScan} onClose={() => { setShowScan(false); setScanResult(null); setScanning(false); }} title="Scanner un Reçu">
-        <div className="space-y-4">
-          <div className="text-center">
-            <div
-              onClick={() => fileInputRef.current?.click()}
-              className="mx-auto w-full py-12 border-2 border-dashed border-white/20 rounded-2xl hover:border-emerald-500/50 hover:bg-emerald-500/5 transition cursor-pointer"
-            >
-              {scanning ? (
-                <div className="flex flex-col items-center gap-3">
-                  <div className="w-10 h-10 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
-                  <p className="text-white/60 text-sm">Analyse en cours...</p>
-                </div>
-              ) : (
-                <>
-                  <ScanLine size={40} className="mx-auto text-white/30 mb-3" />
-                  <p className="text-white/60 text-sm">Prendre une photo ou choisir un fichier</p>
-                  <p className="text-white/30 text-xs mt-1">JPG, PNG acceptés</p>
-                </>
-              )}
-            </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              className="hidden"
-              onChange={(e) => handleScan(e.target.files[0])}
-            />
-          </div>
-
-          {scanResult && (
-            <div className="bg-blue-500/10 border border-blue-500/20 rounded-2xl p-4 space-y-3">
-              <p className="text-blue-400 text-xs font-medium uppercase tracking-wider">Résultat OCR</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <p className="text-white/50 text-xs">Montant détecté</p>
-                  <p className="text-white font-bold text-xl">€{scanResult.amount}</p>
-                </div>
-                <div>
-                  <p className="text-white/50 text-xs">Date détectée</p>
-                  <p className="text-white font-semibold">{scanResult.date}</p>
-                </div>
-              </div>
-              <details className="text-xs">
-                <summary className="text-white/30 cursor-pointer">Texte brut détecté</summary>
-                <pre className="mt-2 text-white/40 whitespace-pre-wrap text-[10px] max-h-32 overflow-y-auto">{scanResult.rawText}</pre>
-              </details>
-              <Btn
-                className="w-full"
-                onClick={() => {
-                  setTxType("expense");
-                  setTxForm({
-                    ...txForm,
-                    amount: scanResult.amount,
-                    date: scanResult.date,
-                  });
-                  setShowScan(false);
-                  setShowAddTx(true);
-                  setScanResult(null);
-                }}
-              >
-                <Check size={16} /> Vérifier et Valider
-              </Btn>
-            </div>
-          )}
-        </div>
-      </Modal>
-    </div>
-  );
-}
+import { Wallet,Plus,Minus,Home,Settings,Camera,ArrowUpDown,Trash2,Edit3,Check,X,TrendingUp,TrendingDown,CreditCard,Banknote,PiggyBank,BarChart3,Receipt,Globe,ScanLine,Search,ChevronRight,ChevronLeft,Target,Repeat,Eye,EyeOff,Percent,PieChart,LayoutDashboard,Building2,ArrowLeftRight,CalendarClock,Upload,FileText,Tag,Car,Gem,Smartphone,Package,CirclePlus } from "lucide-react";
+import { PieChart as RechartsPie,Pie,Cell,ResponsiveContainer,XAxis,YAxis,Tooltip,CartesianGrid,AreaChart,Area,BarChart,Bar } from "recharts";
+
+const CURRENCIES={MUR:"Rs",EUR:"€",USD:"$"};
+const ACCOUNT_TYPES=[{id:"cash",label:"Cash"},{id:"bank",label:"Banque"},{id:"savings",label:"Épargne"},{id:"crypto",label:"Crypto"}];
+const DEF_EXP_CATS=[{id:"food",label:"Alimentation",emoji:"🍕",color:"#f97316",isDefault:true},{id:"transport",label:"Transport",emoji:"🚗",color:"#3b82f6",isDefault:true},{id:"housing",label:"Logement",emoji:"🏠",color:"#8b5cf6",isDefault:true},{id:"health",label:"Santé",emoji:"💊",color:"#ef4444",isDefault:true},{id:"entertainment",label:"Loisirs",emoji:"🎮",color:"#ec4899",isDefault:true},{id:"shopping",label:"Shopping",emoji:"🛍️",color:"#f59e0b",isDefault:true},{id:"utilities",label:"Factures",emoji:"💡",color:"#6366f1",isDefault:true},{id:"education",label:"Éducation",emoji:"📚",color:"#14b8a6",isDefault:true},{id:"subscriptions",label:"Abonnements",emoji:"📱",color:"#a855f7",isDefault:true},{id:"other",label:"Autre",emoji:"📌",color:"#6b7280",isDefault:true}];
+const DEF_INC_CATS=[{id:"salary",label:"Salaire",emoji:"💰",color:"#10b981",isDefault:true},{id:"freelance",label:"Freelance",emoji:"💻",color:"#06b6d4",isDefault:true},{id:"investment",label:"Investissement",emoji:"📈",color:"#8b5cf6",isDefault:true},{id:"gift",label:"Cadeau",emoji:"🎁",color:"#f43f5e",isDefault:true},{id:"refund",label:"Remboursement",emoji:"↩️",color:"#64748b",isDefault:true},{id:"other_income",label:"Autre",emoji:"📌",color:"#6b7280",isDefault:true}];
+const DEF_PLANNED_CATS=[{id:"taxes",label:"Impôts",emoji:"🏛️",color:"#ef4444"},{id:"insurance",label:"Assurance",emoji:"🛡️",color:"#3b82f6"},{id:"rent",label:"Loyer",emoji:"🏠",color:"#8b5cf6"},{id:"electricity",label:"Électricité",emoji:"⚡",color:"#f59e0b"},{id:"water",label:"Eau",emoji:"💧",color:"#06b6d4"},{id:"internet",label:"Internet",emoji:"🌐",color:"#6366f1"},{id:"phone",label:"Téléphone",emoji:"📞",color:"#a855f7"},{id:"car_payment",label:"Crédit auto",emoji:"🚗",color:"#f97316"},{id:"mortgage",label:"Crédit immo",emoji:"🏦",color:"#14b8a6"},{id:"school",label:"Scolarité",emoji:"🎓",color:"#ec4899"},{id:"gym",label:"Sport/Gym",emoji:"💪",color:"#10b981"},{id:"savings_plan",label:"Plan épargne",emoji:"🐷",color:"#f43f5e"}];
+const ASSET_TYPES=[{id:"real_estate",label:"Immobilier",emoji:"🏠"},{id:"vehicle",label:"Véhicule",emoji:"🚗"},{id:"jewelry",label:"Bijoux/Luxe",emoji:"💎"},{id:"electronics",label:"Électronique",emoji:"📱"},{id:"other_asset",label:"Autre",emoji:"📦"}];
+const RCOLORS=["#f97316","#3b82f6","#8b5cf6","#ef4444","#ec4899","#f59e0b","#6366f1","#14b8a6","#a855f7","#10b981","#06b6d4","#f43f5e","#64748b","#84cc16"];
+const MOCK_RATES={EUR:1,USD:1.08,MUR:48.5};
+
+const DB_NAME="BudgetAppDB",DB_V=3;
+function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open(DB_NAME,DB_V);r.onupgradeneeded=e=>{const d=e.target.result;["accounts","transactions","settings","assets","planned","categories"].forEach(s=>{if(!d.objectStoreNames.contains(s))d.createObjectStore(s,{keyPath:"id"});});};r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error);})}
+async function dbAll(s){const d=await openDB();return new Promise((r,j)=>{const t=d.transaction(s,"readonly"),q=t.objectStore(s).getAll();q.onsuccess=()=>r(q.result);q.onerror=()=>j(q.error)})}
+async function dbPut(s,v){const d=await openDB();return new Promise((r,j)=>{const t=d.transaction(s,"readwrite");t.objectStore(s).put(v);t.oncomplete=()=>r();t.onerror=()=>j(t.error)})}
+async function dbDel(s,k){const d=await openDB();return new Promise((r,j)=>{const t=d.transaction(s,"readwrite");t.objectStore(s).delete(k);t.oncomplete=()=>r();t.onerror=()=>j(t.error)})}
+
+const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+const fmt=(a,c="EUR")=>`${CURRENCIES[c]||"€"}${Math.abs(a).toLocaleString("fr-FR",{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+const toEUR=(a,c,r)=>a/(r[c]||1);
+const today=()=>new Date().toISOString().split("T")[0];
+
+function AccIcon({type,size=20}){const p={size,strokeWidth:1.5};if(type==="cash")return<Banknote{...p}/>;if(type==="savings")return<PiggyBank{...p}/>;if(type==="crypto")return<Globe{...p}/>;return<CreditCard{...p}/>}
+function AssetIcon({type,size=20}){if(type==="real_estate")return<Building2 size={size} strokeWidth={1.5}/>;if(type==="vehicle")return<Car size={size} strokeWidth={1.5}/>;if(type==="jewelry")return<Gem size={size} strokeWidth={1.5}/>;if(type==="electronics")return<Smartphone size={size} strokeWidth={1.5}/>;return<Package size={size} strokeWidth={1.5}/>}
+
+function Modal({open,onClose,title,children}){if(!open)return null;return(<div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center"><div className="absolute inset-0 bg-black/70 backdrop-blur-md" onClick={onClose}/><div className="relative w-full max-w-lg max-h-[92vh] overflow-y-auto rounded-t-[28px] sm:rounded-2xl p-6 pb-10" style={{background:"linear-gradient(180deg,#1e2028,#16181e)",border:"1px solid rgba(255,255,255,0.08)",animation:"slideUp .35s cubic-bezier(.16,1,.3,1)"}}><div className="w-10 h-1 rounded-full bg-white/20 mx-auto mb-5 sm:hidden"/><div className="flex items-center justify-between mb-6"><h3 className="text-[17px] font-bold text-white">{title}</h3><button onClick={onClose} className="w-8 h-8 rounded-full bg-white/10 flex items-center justify-center text-white/50 active:scale-90 transition"><X size={16}/></button></div>{children}</div></div>)}
+function Inp({label,...p}){return(<div className="mb-4">{label&&<label className="block text-[11px] font-semibold text-white/40 uppercase tracking-[0.08em] mb-2">{label}</label>}<input{...p}className={`w-full bg-white/[0.04] border border-white/[0.08] rounded-2xl px-4 py-[14px] text-white placeholder:text-white/20 focus:outline-none focus:border-emerald-500/40 transition-all text-[15px] ${p.className||""}`}/></div>)}
+function Sel({label,options,...p}){return(<div className="mb-4">{label&&<label className="block text-[11px] font-semibold text-white/40 uppercase tracking-[0.08em] mb-2">{label}</label>}<select{...p}className="w-full bg-white/[0.04] border border-white/[0.08] rounded-2xl px-4 py-[14px] text-white focus:outline-none appearance-none transition text-[15px]"style={{backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.3)' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 16px center"}}>{options.map(o=><option key={o.value}value={o.value}style={{background:"#1a1d23"}}>{o.label}</option>)}</select></div>)}
+function Btn({children,variant="primary",className="",...p}){const base="flex items-center justify-center gap-2.5 font-bold rounded-2xl px-5 py-[15px] transition-all active:scale-[0.97] disabled:opacity-30 text-[14px] w-full";const v={primary:"bg-emerald-500 text-white shadow-lg shadow-emerald-500/20",secondary:"bg-white/[0.06] text-white border border-white/[0.08]",danger:"bg-red-500/15 text-red-400 border border-red-500/20"};return<button className={`${base} ${v[variant]||v.primary} ${className}`}{...p}>{children}</button>}
+function Tabs({active,onChange,tabs}){return(<div className="flex bg-white/[0.04] rounded-2xl p-1.5 gap-1 mb-5">{tabs.map(t=>(<button key={t.id}onClick={()=>onChange(t.id)}className={`flex-1 py-2.5 rounded-xl text-[13px] font-bold transition ${active===t.id?"bg-white/[0.08] text-white":"text-white/35"}`}>{t.label}</button>))}</div>)}
+function PageHeader({title,onBack,rightAction}){return(<div className="flex items-center justify-between mb-5"><div className="flex items-center gap-3">{onBack&&<button onClick={onBack}className="w-9 h-9 rounded-xl bg-white/[0.04] border border-white/[0.06] flex items-center justify-center text-white/50 active:scale-90 transition"><ChevronLeft size={18}/></button>}<h1 className="text-[22px] font-extrabold text-white tracking-tight">{title}</h1></div>{rightAction}</div>)}
+
+function TxRow({tx,accounts,eCats,iCats,onDelete,showAcc=true}){
+  const cats=tx.type==="income"?iCats:tx.type==="transfer"?[{id:"transfer",label:"Transfert",emoji:"↔️",color:"#3b82f6"}]:eCats;
+  const cat=cats.find(c=>c.id===tx.category)||cats[cats.length-1]||{emoji:"📌",label:"Autre",color:"#6b7280"};
+  const acc=accounts.find(a=>a.id===tx.accountId);const toA=tx.toAccountId?accounts.find(a=>a.id===tx.toAccountId):null;
+  return(<div className="flex items-center gap-3 py-3.5 border-b border-white/[0.04] last:border-0 group"><div className="w-10 h-10 rounded-xl flex items-center justify-center text-[17px] flex-shrink-0"style={{background:cat.color+"15"}}>{cat.emoji}</div><div className="flex-1 min-w-0"><p className="text-white text-[13px] font-semibold truncate">{tx.note||cat.label}</p><p className="text-white/30 text-[11px] mt-0.5">{tx.type==="transfer"?`${acc?.name||""}→${toA?.name||""}`:`${cat.label}${showAcc?` · ${acc?.name||""}`:""}`} · {new Date(tx.date).toLocaleDateString("fr-FR",{day:"numeric",month:"short"})}{tx.recurring&&tx.recurring!=="none"?<span className="text-blue-400 ml-1">🔄</span>:""}</p></div><p className={`text-[14px] font-bold flex-shrink-0 ${tx.type==="income"?"text-emerald-400":tx.type==="transfer"?"text-blue-400":"text-white"}`}>{tx.type==="income"?"+":tx.type==="transfer"?"↔":"-"}{fmt(tx.amount,tx.currency||acc?.currency)}</p>{onDelete&&<button onClick={()=>onDelete(tx.id)}className="p-1.5 rounded-lg opacity-0 group-hover:opacity-100 text-white/20 hover:text-red-400 transition ml-1"><Trash2 size={13}/></button>}</div>)}
+
+export default function BudgetApp(){
+  const[page,setPage]=useState("home");const[subPage,setSubPage]=useState(null);const[selAccId,setSelAccId]=useState(null);
+  const[accounts,setAccounts]=useState([]);const[transactions,setTx]=useState([]);const[assets,setAssets]=useState([]);const[planned,setPlanned]=useState([]);
+  const[custExpCats,setCustExpCats]=useState([]);const[custIncCats,setCustIncCats]=useState([]);
+  const[rates,setRates]=useState(MOCK_RATES);const[loaded,setLoaded]=useState(false);const[balVis,setBalVis]=useState(true);
+  const[showAddAcc,setShowAddAcc]=useState(false);const[editAcc,setEditAcc]=useState(null);
+  const[showAddTx,setShowAddTx]=useState(false);const[txType,setTxType]=useState("expense");
+  const[showScan,setShowScan]=useState(false);const[scanRes,setScanRes]=useState(null);const[scanning,setScanning]=useState(false);
+  const[showTransfer,setShowTransfer]=useState(false);const[showAddAsset,setShowAddAsset]=useState(false);const[editAsset,setEditAsset]=useState(null);
+  const[showAddPlanned,setShowAddPlanned]=useState(false);const[editPlanned,setEditPlanned]=useState(null);
+  const[showAddCat,setShowAddCat]=useState(false);const[newCatType,setNewCatType]=useState("expense");
+  const[showCSV,setShowCSV]=useState(false);
+  const[statsPeriod,setStatsPeriod]=useState("month");const[statsAccId,setStatsAccId]=useState("all");
+  const[txAccF,setTxAccF]=useState("all");const[txSearch,setTxSearch]=useState("");const[txTypeF,setTxTypeF]=useState("all");
+
+  const[accForm,setAccForm]=useState({name:"",type:"bank",currency:"EUR",balance:""});
+  const[txForm,setTxForm]=useState({amount:"",category:"",accountId:"",note:"",date:today(),recurring:"none",currency:"EUR"});
+  const[trForm,setTrForm]=useState({fromAccountId:"",toAccountId:"",amount:"",note:"",date:today()});
+  const[assetForm,setAssetForm]=useState({name:"",type:"real_estate",value:"",currency:"EUR",description:"",purchaseDate:""});
+  const[planForm,setPlanForm]=useState({name:"",category:"",amount:"",currency:"EUR",frequency:"monthly",dueDate:"",accountId:"",note:""});
+  const[catForm,setCatForm]=useState({name:"",emoji:"📌",color:RCOLORS[0]});
+  const fileRef=useRef(null);const csvRef=useRef(null);
+
+  const eCats=useMemo(()=>[...DEF_EXP_CATS,...custExpCats],[custExpCats]);
+  const iCats=useMemo(()=>[...DEF_INC_CATS,...custIncCats],[custIncCats]);
+  const pCats=useMemo(()=>[...DEF_PLANNED_CATS,...custExpCats],[custExpCats]);
+
+  useEffect(()=>{(async()=>{try{const[a,t,as,pl,ca]=await Promise.all([dbAll("accounts").catch(()=>[]),dbAll("transactions").catch(()=>[]),dbAll("assets").catch(()=>[]),dbAll("planned").catch(()=>[]),dbAll("categories").catch(()=>[])]);if(a?.length)setAccounts(a);if(t?.length)setTx(t);if(as?.length)setAssets(as);if(pl?.length)setPlanned(pl);if(ca?.length){setCustExpCats(ca.filter(c=>c.catType==="expense"));setCustIncCats(ca.filter(c=>c.catType==="income"))}}catch{}setLoaded(true)})()},[]);
+  const persist=useCallback(async(a,t)=>{try{for(const x of a)await dbPut("accounts",x);for(const x of t)await dbPut("transactions",x)}catch{}},[]);
+  useEffect(()=>{fetch("https://api.exchangerate-api.com/v4/latest/EUR").then(r=>r.json()).then(d=>{if(d.rates)setRates({EUR:1,USD:d.rates.USD||1.08,MUR:d.rates.MUR||48.5})}).catch(()=>{})},[]);
+  useEffect(()=>{if(!loaded)return;const now=new Date(),nw=[];transactions.forEach(tx=>{if(!tx.recurring||tx.recurring==="none")return;const l=new Date(tx.date);let n=new Date(l);if(tx.recurring==="weekly")n.setDate(n.getDate()+7);else n.setMonth(n.getMonth()+1);while(n<=now){if(!transactions.find(t=>t.recurringParent===tx.id&&t.date===n.toISOString().split("T")[0]))nw.push({...tx,id:uid(),date:n.toISOString().split("T")[0],recurringParent:tx.id,recurring:"none"});if(tx.recurring==="weekly")n.setDate(n.getDate()+7);else n.setMonth(n.getMonth()+1)}});if(nw.length){const u=[...transactions,...nw];setTx(u);persist(accounts,u)}},[loaded]);
+
+  const getBal=useCallback(acc=>{const txs=transactions.filter(t=>t.accountId===acc.id||t.toAccountId===acc.id);return txs.reduce((s,t)=>{if(t.type==="transfer"){if(t.accountId===acc.id)return s-t.amount;if(t.toAccountId===acc.id)return s+t.amount}return s+(t.type==="income"?t.amount:-t.amount)},acc.initialBalance||0)},[transactions]);
+  const totalEUR=useMemo(()=>accounts.reduce((s,a)=>s+toEUR(getBal(a),a.currency,rates),0),[accounts,transactions,rates]);
+  const totalAssEUR=useMemo(()=>assets.reduce((s,a)=>s+toEUR(parseFloat(a.value)||0,a.currency,rates),0),[assets,rates]);
+  const totalPlanEUR=useMemo(()=>planned.reduce((s,p)=>s+toEUR(parseFloat(p.amount)||0,p.currency,rates),0),[planned,rates]);
+
+  const getMonthTx=useCallback((off=0,aId=null)=>{const now=new Date(),y=now.getFullYear(),m=now.getMonth()+off;return transactions.filter(t=>{if(aId&&aId!=="all"&&t.accountId!==aId)return false;const d=new Date(t.date);return d.getMonth()===((m%12)+12)%12&&d.getFullYear()===y+Math.floor(m/12)})},[transactions]);
+  const thisMTx=useMemo(()=>getMonthTx(0),[getMonthTx]);
+  const lastMTx=useMemo(()=>getMonthTx(-1),[getMonthTx]);
+  const mInc=thisMTx.filter(t=>t.type==="income").reduce((s,t)=>s+toEUR(t.amount,t.currency||"EUR",rates),0);
+  const mExp=thisMTx.filter(t=>t.type==="expense").reduce((s,t)=>s+toEUR(t.amount,t.currency||"EUR",rates),0);
+  const lmInc=lastMTx.filter(t=>t.type==="income").reduce((s,t)=>s+toEUR(t.amount,t.currency||"EUR",rates),0);
+  const incTrend=lmInc>0?((mInc-lmInc)/lmInc*100):0;
+  const savRate=mInc>0?((mInc-mExp)/mInc*100):0;
+
+  const filtTx=useMemo(()=>{const now=new Date(),s=new Date();if(statsPeriod==="day")s.setHours(0,0,0,0);else if(statsPeriod==="week")s.setDate(now.getDate()-7);else s.setMonth(now.getMonth()-1);return transactions.filter(t=>{if(statsAccId!=="all"&&t.accountId!==statsAccId)return false;return new Date(t.date)>=s&&new Date(t.date)<=now})},[transactions,statsPeriod,statsAccId]);
+
+  const catBreak=useMemo(()=>{const m={};const txs=statsAccId!=="all"?filtTx:thisMTx;txs.filter(t=>t.type==="expense").forEach(t=>{const c=eCats.find(x=>x.id===t.category)||eCats[eCats.length-1];m[c.id]=m[c.id]||{...c,total:0};m[c.id].total+=toEUR(t.amount,t.currency||"EUR",rates)});return Object.values(m).sort((a,b)=>b.total-a.total)},[filtTx,thisMTx,rates,eCats,statsAccId]);
+
+  const mChart=useMemo(()=>{const d=[];for(let i=5;i>=0;i--){const txs=getMonthTx(-i,statsAccId!=="all"?statsAccId:null);const inc=txs.filter(t=>t.type==="income").reduce((s,t)=>s+toEUR(t.amount,t.currency||"EUR",rates),0);const exp=txs.filter(t=>t.type==="expense").reduce((s,t)=>s+toEUR(t.amount,t.currency||"EUR",rates),0);const dt=new Date();dt.setMonth(dt.getMonth()-i);d.push({month:dt.toLocaleDateString("fr-FR",{month:"short"}),Revenus:Math.round(inc),"Dépenses":Math.round(exp)})}return d},[getMonthTx,rates,statsAccId]);
+
+  const balOT=useMemo(()=>{const sorted=[...transactions].sort((a,b)=>a.date.localeCompare(b.date));let run=accounts.reduce((s,a)=>s+toEUR(a.initialBalance||0,a.currency,rates),0);return sorted.map(t=>{const a=accounts.find(x=>x.id===t.accountId);const e=toEUR(t.amount,t.currency||a?.currency||"EUR",rates);run+=t.type==="income"?e:t.type==="transfer"?0:-e;return{date:t.date,solde:Math.round(run*100)/100}}).slice(-30)},[transactions,accounts,rates]);
+
+  const recentTx=useMemo(()=>{let txs=[...transactions].sort((a,b)=>b.date.localeCompare(a.date)||(b.createdAt||"").localeCompare(a.createdAt||""));if(txAccF!=="all")txs=txs.filter(t=>t.accountId===txAccF||t.toAccountId===txAccF);if(txTypeF!=="all")txs=txs.filter(t=>t.type===txTypeF);if(txSearch.trim())txs=txs.filter(t=>{const s=txSearch.toLowerCase();const c=[...eCats,...iCats].find(x=>x.id===t.category);return(t.note||"").toLowerCase().includes(s)||(c?.label||"").toLowerCase().includes(s)});return txs},[transactions,txAccF,txTypeF,txSearch,eCats,iCats]);
+
+  const saveAcc=()=>{const a={id:editAcc?editAcc.id:uid(),name:accForm.name||"Mon Compte",type:accForm.type,currency:accForm.currency,initialBalance:parseFloat(accForm.balance)||0,createdAt:editAcc?.createdAt||new Date().toISOString()};const u=editAcc?accounts.map(x=>x.id===a.id?a:x):[...accounts,a];setAccounts(u);persist(u,transactions);setShowAddAcc(false);setEditAcc(null);setAccForm({name:"",type:"bank",currency:"EUR",balance:""})};
+  const delAcc=id=>{const u=accounts.filter(a=>a.id!==id);const ut=transactions.filter(t=>t.accountId!==id&&t.toAccountId!==id);setAccounts(u);setTx(ut);persist(u,ut);dbDel("accounts",id).catch(()=>{})};
+  const saveTx=()=>{const tx={id:uid(),type:txType,amount:parseFloat(txForm.amount)||0,currency:txForm.currency||"EUR",category:txForm.category||(txType==="expense"?"other":"other_income"),accountId:txForm.accountId||accounts[0]?.id,note:txForm.note,date:txForm.date||today(),recurring:txForm.recurring||"none",createdAt:new Date().toISOString()};if(tx.amount<=0)return;const u=[...transactions,tx];setTx(u);persist(accounts,u);setShowAddTx(false);setTxForm({amount:"",category:"",accountId:"",note:"",date:today(),recurring:"none",currency:"EUR"})};
+  const delTx=id=>{const u=transactions.filter(t=>t.id!==id);setTx(u);persist(accounts,u);dbDel("transactions",id).catch(()=>{})};
+  const saveTr=()=>{const{fromAccountId:f,toAccountId:t,amount:a,note:n,date:d}=trForm;const amt=parseFloat(a)||0;if(amt<=0||!f||!t||f===t)return;const fa=accounts.find(x=>x.id===f);const tx={id:uid(),type:"transfer",amount:amt,currency:fa?.currency||"EUR",category:"transfer",accountId:f,toAccountId:t,note:n||"Transfert",date:d||today(),recurring:"none",createdAt:new Date().toISOString()};const u=[...transactions,tx];setTx(u);persist(accounts,u);setShowTransfer(false);setTrForm({fromAccountId:"",toAccountId:"",amount:"",note:"",date:today()})};
+  const saveAsset=()=>{const a={id:editAsset?editAsset.id:uid(),...assetForm,value:parseFloat(assetForm.value)||0,createdAt:editAsset?.createdAt||new Date().toISOString()};const u=editAsset?assets.map(x=>x.id===a.id?a:x):[...assets,a];setAssets(u);u.forEach(i=>dbPut("assets",i).catch(()=>{}));setShowAddAsset(false);setEditAsset(null);setAssetForm({name:"",type:"real_estate",value:"",currency:"EUR",description:"",purchaseDate:""})};
+  const delAsset=id=>{setAssets(assets.filter(a=>a.id!==id));dbDel("assets",id).catch(()=>{})};
+  const savePlan=()=>{const p={id:editPlanned?editPlanned.id:uid(),...planForm,amount:parseFloat(planForm.amount)||0,createdAt:editPlanned?.createdAt||new Date().toISOString()};const u=editPlanned?planned.map(x=>x.id===p.id?p:x):[...planned,p];setPlanned(u);u.forEach(i=>dbPut("planned",i).catch(()=>{}));setShowAddPlanned(false);setEditPlanned(null);setPlanForm({name:"",category:"",amount:"",currency:"EUR",frequency:"monthly",dueDate:"",accountId:"",note:""})};
+  const delPlan=id=>{setPlanned(planned.filter(p=>p.id!==id));dbDel("planned",id).catch(()=>{})};
+  const saveCat=()=>{const c={id:uid(),label:catForm.name||"Catégorie",emoji:catForm.emoji||"📌",color:catForm.color||RCOLORS[0],catType:newCatType,isDefault:false};if(newCatType==="expense")setCustExpCats([...custExpCats,c]);else setCustIncCats([...custIncCats,c]);dbPut("categories",c).catch(()=>{});setShowAddCat(false);setCatForm({name:"",emoji:"📌",color:RCOLORS[0]})};
+  const handleCSV=file=>{if(!file)return;const r=new FileReader();r.onload=e=>{const lines=e.target.result.split("\n").filter(l=>l.trim());const nw=[];lines.slice(1).forEach(l=>{const c=l.split(/[,;]/).map(x=>x.trim().replace(/"/g,""));if(c.length>=3){const raw=parseFloat((c[2]||"0").replace(",","."));if(!isNaN(raw)&&raw!==0)nw.push({id:uid(),type:raw>0?"income":"expense",amount:Math.abs(raw),currency:"EUR",category:raw>0?"other_income":"other",accountId:accounts[0]?.id||"",note:c[1]||"",date:c[0]?.includes("-")?c[0]:today(),recurring:"none",createdAt:new Date().toISOString()})}});if(nw.length){const u=[...transactions,...nw];setTx(u);persist(accounts,u)}setShowCSV(false);alert(`${nw.length} transactions importées !`)};r.readAsText(file)};
+  const handleScan=async file=>{if(!file)return;setScanning(true);try{const text=await new Promise(res=>{const r=new FileReader();r.onload=async e=>{try{const T=await import("https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.esm.min.js");const{data}=await T.recognize(e.target.result,"fra+eng");res(data.text)}catch{res("")}};r.readAsDataURL(file)});const amounts=text.match(/(\d+[.,]\d{2})/g);const dates=text.match(/(\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4})/g);const amount=amounts?Math.max(...amounts.map(a=>parseFloat(a.replace(",",".")))):0;let date=today();if(dates?.[0]){const p=dates[0].split(/[\/\-\.]/);if(p.length===3){const y=p[2].length===2?"20"+p[2]:p[2];date=`${y}-${p[1].padStart(2,"0")}-${p[0].padStart(2,"0")}`}}setScanRes({amount:amount.toFixed(2),date,rawText:text||"Non détecté"});setTxForm(f=>({...f,amount:amount.toFixed(2),date}))}catch(err){setScanRes({amount:"0.00",date:today(),rawText:"Erreur"})}setScanning(false)};
+
+  const atc=t=>t==="cash"?["rgba(245,158,11,0.15)","#fbbf24"]:t==="savings"?["rgba(139,92,246,0.15)","#a78bfa"]:t==="crypto"?["rgba(59,130,246,0.15)","#60a5fa"]:["rgba(16,185,129,0.15)","#34d399"];
+  const now2=new Date();const greet=now2.getHours()<12?"Bonjour":now2.getHours()<18?"Bon après-midi":"Bonsoir";
+
+  // ══ HOME ══
+  const renderHome=()=>(<div className="space-y-5">
+    <div className="flex items-center justify-between"><div><p className="text-white/40 text-[13px] font-medium">{greet} 👋</p><h1 className="text-[22px] font-extrabold text-white tracking-tight mt-0.5">Vue d'ensemble</h1></div><button onClick={()=>setBalVis(!balVis)}className="w-10 h-10 rounded-xl bg-white/[0.04] border border-white/[0.06] flex items-center justify-center text-white/40 active:scale-90 transition">{balVis?<Eye size={17}/>:<EyeOff size={17}/>}</button></div>
+
+    <button onClick={()=>setSubPage("accounts")}className="w-full text-left relative overflow-hidden rounded-3xl p-6"style={{background:"linear-gradient(135deg,#059669,#10b981,#14b8a6)",boxShadow:"0 20px 40px rgba(16,185,129,0.15)"}}>
+      <div className="absolute top-0 right-0 w-40 h-40 bg-white/10 rounded-full -translate-y-1/2 translate-x-1/2"/>
+      <p className="text-emerald-100 text-[12px] font-semibold uppercase tracking-wider">Solde Total</p>
+      <p className="text-[36px] font-extrabold text-white tracking-tight mt-1">{balVis?`€${totalEUR.toFixed(2)}`:"••••••"}</p>
+      <div className="flex items-center gap-2 mt-2 text-emerald-100 text-[12px]"><span>Voir mes {accounts.length} compte{accounts.length!==1?"s":""}</span><ChevronRight size={14}/></div>
+      <div className="flex gap-6 mt-4"><div><p className="text-emerald-200/60 text-[10px]">Revenus</p><p className="text-white font-bold text-[14px] flex items-center gap-1"><TrendingUp size={12}/>€{mInc.toFixed(0)}</p></div><div><p className="text-emerald-200/60 text-[10px]">Dépenses</p><p className="text-white font-bold text-[14px] flex items-center gap-1"><TrendingDown size={12}/>€{mExp.toFixed(0)}</p></div><div><p className="text-emerald-200/60 text-[10px]">Épargne</p><p className="text-white font-bold text-[14px] flex items-center gap-1"><Percent size={12}/>{savRate.toFixed(0)}%</p></div></div>
+    </button>
+
+    <div className="grid grid-cols-4 gap-2">{[{label:"Dépense",icon:<Minus size={18}/>,bg:"rgba(239,68,68,0.12)",ic:"#f87171",fn:()=>{setTxType("expense");setShowAddTx(true)}},{label:"Revenu",icon:<Plus size={18}/>,bg:"rgba(16,185,129,0.12)",ic:"#34d399",fn:()=>{setTxType("income");setShowAddTx(true)}},{label:"Transfert",icon:<ArrowLeftRight size={18}/>,bg:"rgba(59,130,246,0.12)",ic:"#60a5fa",fn:()=>setShowTransfer(true)},{label:"Scanner",icon:<Camera size={18}/>,bg:"rgba(168,85,247,0.12)",ic:"#c084fc",fn:()=>setShowScan(true)}].map(a=>(<button key={a.label}onClick={a.fn}className="flex flex-col items-center gap-2 bg-white/[0.025] border border-white/[0.05] rounded-2xl p-3 active:scale-95 transition"><div className="w-10 h-10 rounded-full flex items-center justify-center"style={{background:a.bg,color:a.ic}}>{a.icon}</div><span className="text-[10px] text-white/50 font-semibold">{a.label}</span></button>))}</div>
+
+    <div><div className="flex items-center justify-between mb-3"><h3 className="text-[14px] font-bold text-white">Biens Immobilisés</h3><div className="flex items-center gap-2"><span className="text-white/30 text-[12px] font-semibold">≈ €{totalAssEUR.toFixed(0)}</span><button onClick={()=>setSubPage("assets")}className="text-emerald-400 text-[12px] font-bold">Voir →</button></div></div>
+    {assets.length===0?<button onClick={()=>setShowAddAsset(true)}className="w-full text-center py-6 bg-white/[0.02] rounded-2xl border border-dashed border-white/[0.08] active:bg-white/[0.04] transition"><Building2 size={24}className="mx-auto text-white/15 mb-2"/><p className="text-white/30 text-[12px]">Ajouter un bien</p></button>:
+    <div className="flex gap-2 overflow-x-auto pb-1"style={{scrollbarWidth:"none"}}>{assets.slice(0,4).map(a=>(<div key={a.id}className="flex-shrink-0 w-[140px] bg-white/[0.025] border border-white/[0.06] rounded-2xl p-3.5"><span className="text-[20px]">{ASSET_TYPES.find(t=>t.id===a.type)?.emoji||"📦"}</span><p className="text-white text-[12px] font-semibold mt-2 truncate">{a.name}</p><p className="text-amber-400 text-[13px] font-bold mt-0.5">{fmt(a.value,a.currency)}</p></div>))}</div>}</div>
+
+    <div><div className="flex items-center justify-between mb-3"><h3 className="text-[14px] font-bold text-white">Dépenses à Prévoir</h3><div className="flex items-center gap-2"><span className="text-white/30 text-[12px] font-semibold">€{totalPlanEUR.toFixed(0)}/mois</span><button onClick={()=>setSubPage("planned")}className="text-emerald-400 text-[12px] font-bold">Voir →</button></div></div>
+    {planned.length===0?<button onClick={()=>setShowAddPlanned(true)}className="w-full text-center py-6 bg-white/[0.02] rounded-2xl border border-dashed border-white/[0.08] active:bg-white/[0.04] transition"><CalendarClock size={24}className="mx-auto text-white/15 mb-2"/><p className="text-white/30 text-[12px]">Ajouter une dépense prévue</p></button>:
+    <div className="space-y-2">{planned.slice(0,3).map(p=>{const pc=pCats.find(c=>c.id===p.category)||{emoji:"📌",label:p.name,color:"#6b7280"};return(<div key={p.id}className="flex items-center gap-3 bg-white/[0.025] border border-white/[0.06] rounded-2xl p-3.5"><div className="w-9 h-9 rounded-xl flex items-center justify-center text-[16px]"style={{background:pc.color+"18"}}>{pc.emoji}</div><div className="flex-1 min-w-0"><p className="text-white text-[13px] font-semibold truncate">{p.name||pc.label}</p><p className="text-white/30 text-[11px]">{p.frequency==="monthly"?"Mensuel":p.frequency==="yearly"?"Annuel":"Hebdo"}</p></div><p className="text-orange-400 text-[14px] font-bold">{fmt(p.amount,p.currency)}</p></div>)})}</div>}</div>
+
+    <div><div className="flex items-center justify-between mb-3"><h3 className="text-[14px] font-bold text-white">Dernières Transactions</h3><button onClick={()=>setPage("transactions")}className="text-emerald-400 text-[12px] font-bold">Tout voir →</button></div><div className="bg-white/[0.025] border border-white/[0.06] rounded-2xl px-4">{recentTx.slice(0,5).map(tx=><TxRow key={tx.id}tx={tx}accounts={accounts}eCats={eCats}iCats={iCats}/>)}{recentTx.length===0&&<div className="py-8 text-center"><Receipt size={24}className="mx-auto text-white/10 mb-2"/><p className="text-white/25 text-[12px]">Aucune transaction</p></div>}</div></div>
+  </div>);
+
+  // ══ ACCOUNTS LIST ══
+  const renderAccList=()=>(<div className="space-y-5">
+    <PageHeader title="Mes Comptes"onBack={()=>setSubPage(null)}rightAction={<button onClick={()=>{setAccForm({name:"",type:"bank",currency:"EUR",balance:""});setEditAcc(null);setShowAddAcc(true)}}className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/20 flex items-center justify-center text-emerald-400 active:scale-90 transition"><Plus size={18}/></button>}/>
+    <div className="bg-white/[0.025] border border-white/[0.06] rounded-2xl p-5 text-center"><p className="text-white/40 text-[11px] font-semibold uppercase tracking-wider">Patrimoine Liquide</p><p className="text-[32px] font-extrabold text-white mt-1">{balVis?`€${totalEUR.toFixed(2)}`:"••••••"}</p></div>
+    <div className="space-y-3">{accounts.map(acc=>{const bal=getBal(acc);const[bg,ic]=atc(acc.type);return(<button key={acc.id}onClick={()=>{setSelAccId(acc.id);setSubPage("accDetail")}}className="w-full flex items-center gap-3 bg-white/[0.025] border border-white/[0.06] rounded-2xl p-4 active:bg-white/[0.05] transition text-left"><div className="w-12 h-12 rounded-xl flex items-center justify-center flex-shrink-0"style={{background:bg,color:ic}}><AccIcon type={acc.type}size={22}/></div><div className="flex-1 min-w-0"><p className="text-white font-bold text-[15px] truncate">{acc.name}</p><p className="text-white/30 text-[12px] mt-0.5">{ACCOUNT_TYPES.find(t=>t.id===acc.type)?.label} · {acc.currency}</p></div><div className="text-right"><p className={`font-extrabold text-[16px] ${bal>=0?"text-emerald-400":"text-red-400"}`}>{balVis?fmt(bal,acc.currency):"••••"}</p><p className="text-white/20 text-[11px]">≈ €{toEUR(bal,acc.currency,rates).toFixed(2)}</p></div><ChevronRight size={18}className="text-white/20 flex-shrink-0"/></button>)})}</div>
+  </div>);
+
+  // ══ ACCOUNT DETAIL ══
+  const renderAccDetail=()=>{const acc=accounts.find(a=>a.id===selAccId);if(!acc)return null;const bal=getBal(acc);const accTxs=transactions.filter(t=>t.accountId===acc.id||t.toAccountId===acc.id).sort((a,b)=>b.date.localeCompare(a.date));const aInc=accTxs.filter(t=>t.type==="income").reduce((s,t)=>s+t.amount,0);const aExp=accTxs.filter(t=>t.type==="expense").reduce((s,t)=>s+t.amount,0);const[bg,ic]=atc(acc.type);
+    const acb={};accTxs.filter(t=>t.type==="expense").forEach(t=>{const c=eCats.find(x=>x.id===t.category)||eCats[eCats.length-1];acb[c.id]=acb[c.id]||{...c,total:0};acb[c.id].total+=t.amount});const accCats=Object.values(acb).sort((a,b)=>b.total-a.total);const tExp=accCats.reduce((s,c)=>s+c.total,0);
+    return(<div className="space-y-5">
+      <PageHeader title={acc.name}onBack={()=>setSubPage("accounts")}rightAction={<div className="flex gap-2"><button onClick={()=>{setEditAcc(acc);setAccForm({name:acc.name,type:acc.type,currency:acc.currency,balance:String(acc.initialBalance)});setShowAddAcc(true)}}className="w-9 h-9 rounded-xl bg-white/[0.04] border border-white/[0.06] flex items-center justify-center text-white/40 active:scale-90 transition"><Edit3 size={15}/></button><button onClick={()=>{delAcc(acc.id);setSubPage("accounts")}}className="w-9 h-9 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center justify-center text-red-400 active:scale-90 transition"><Trash2 size={15}/></button></div>}/>
+      <div className="rounded-2xl p-5 text-center"style={{background:bg}}><div className="w-14 h-14 rounded-2xl mx-auto flex items-center justify-center mb-3"style={{background:"rgba(255,255,255,0.15)",color:ic}}><AccIcon type={acc.type}size={26}/></div><p className="text-white/50 text-[11px] font-semibold uppercase tracking-wider">{ACCOUNT_TYPES.find(t=>t.id===acc.type)?.label} · {acc.currency}</p><p className={`text-[34px] font-extrabold mt-1 ${bal>=0?"text-white":"text-red-300"}`}>{balVis?fmt(bal,acc.currency):"••••••"}</p><p className="text-white/40 text-[12px] mt-1">≈ €{toEUR(bal,acc.currency,rates).toFixed(2)}</p></div>
+      <div className="grid grid-cols-2 gap-3"><div className="bg-emerald-500/8 border border-emerald-500/10 rounded-2xl p-4 text-center"><p className="text-emerald-400/60 text-[10px] font-bold uppercase">Revenus</p><p className="text-emerald-300 text-[18px] font-extrabold mt-1">{fmt(aInc,acc.currency)}</p></div><div className="bg-red-500/8 border border-red-500/10 rounded-2xl p-4 text-center"><p className="text-red-400/60 text-[10px] font-bold uppercase">Dépenses</p><p className="text-red-300 text-[18px] font-extrabold mt-1">{fmt(aExp,acc.currency)}</p></div></div>
+      {accCats.length>0&&<div className="bg-white/[0.025] border border-white/[0.06] rounded-2xl p-5"><h3 className="text-[14px] font-bold text-white mb-4">Catégories</h3><div className="space-y-2.5">{accCats.map(c=>{const pct=tExp>0?(c.total/tExp*100):0;return(<div key={c.id}className="flex items-center gap-3"><span className="text-[16px]">{c.emoji}</span><div className="flex-1"><div className="flex justify-between mb-1"><span className="text-[12px] text-white">{c.label}</span><span className="text-[12px] text-white font-bold">{fmt(c.total,acc.currency)}</span></div><div className="w-full h-1.5 bg-white/[0.05] rounded-full overflow-hidden"><div className="h-full rounded-full"style={{width:`${pct}%`,background:c.color}}/></div></div><span className="text-[11px] text-white/30 w-8 text-right">{pct.toFixed(0)}%</span></div>)})}</div></div>}
+      <div><h3 className="text-[14px] font-bold text-white mb-3">Historique</h3><div className="bg-white/[0.025] border border-white/[0.06] rounded-2xl px-4">{accTxs.slice(0,20).map(tx=><TxRow key={tx.id}tx={tx}accounts={accounts}eCats={eCats}iCats={iCats}onDelete={delTx}showAcc={false}/>)}{accTxs.length===0&&<div className="py-8 text-center"><p className="text-white/25 text-[12px]">Aucune transaction</p></div>}</div></div>
+    </div>)};
+
+  // ══ ASSETS ══
+  const renderAssets=()=>(<div className="space-y-5">
+    <PageHeader title="Biens Immobilisés"onBack={()=>setSubPage(null)}rightAction={<button onClick={()=>{setAssetForm({name:"",type:"real_estate",value:"",currency:"EUR",description:"",purchaseDate:""});setEditAsset(null);setShowAddAsset(true)}}className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/20 flex items-center justify-center text-emerald-400 active:scale-90 transition"><Plus size={18}/></button>}/>
+    <div className="bg-white/[0.025] border border-white/[0.06] rounded-2xl p-5 text-center"><p className="text-white/40 text-[11px] font-semibold uppercase tracking-wider">Valeur Totale</p><p className="text-[28px] font-extrabold text-white mt-1">€{totalAssEUR.toFixed(2)}</p></div>
+    {assets.length===0?<div className="text-center py-12 bg-white/[0.02] rounded-2xl border border-dashed border-white/[0.08]"><Building2 size={36}className="mx-auto text-white/15 mb-3"/><p className="text-white/30 text-[13px]">Aucun bien enregistré</p></div>:
+    <div className="space-y-3">{assets.map(a=>{const at=ASSET_TYPES.find(t=>t.id===a.type);return(<div key={a.id}className="bg-white/[0.025] border border-white/[0.06] rounded-2xl p-4"><div className="flex items-center gap-3"><div className="w-12 h-12 rounded-xl bg-amber-500/15 text-amber-400 flex items-center justify-center flex-shrink-0"><AssetIcon type={a.type}size={22}/></div><div className="flex-1 min-w-0"><p className="text-white font-bold text-[14px] truncate">{a.name}</p><p className="text-white/30 text-[11px] mt-0.5">{at?.label||"Autre"}{a.purchaseDate?` · ${a.purchaseDate}`:""}</p></div><div className="text-right"><p className="text-amber-400 font-extrabold text-[15px]">{fmt(a.value,a.currency)}</p><p className="text-white/20 text-[10px]">≈ €{toEUR(a.value,a.currency,rates).toFixed(0)}</p></div></div>{a.description&&<p className="text-white/30 text-[12px] mt-3 ml-[60px]">{a.description}</p>}<div className="flex gap-2 mt-3 ml-[60px]"><button onClick={()=>{setEditAsset(a);setAssetForm({name:a.name,type:a.type,value:String(a.value),currency:a.currency,description:a.description||"",purchaseDate:a.purchaseDate||""});setShowAddAsset(true)}}className="text-[11px] text-white/30 font-semibold">Modifier</button><span className="text-white/10">·</span><button onClick={()=>delAsset(a.id)}className="text-[11px] text-red-400/50 font-semibold">Supprimer</button></div></div>)})}</div>}
+  </div>);
+
+  // ══ PLANNED ══
+  const renderPlanned=()=>(<div className="space-y-5">
+    <PageHeader title="Dépenses Prévues"onBack={()=>setSubPage(null)}rightAction={<button onClick={()=>{setPlanForm({name:"",category:"",amount:"",currency:"EUR",frequency:"monthly",dueDate:"",accountId:"",note:""});setEditPlanned(null);setShowAddPlanned(true)}}className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/20 flex items-center justify-center text-emerald-400 active:scale-90 transition"><Plus size={18}/></button>}/>
+    <div className="bg-orange-500/8 border border-orange-500/15 rounded-2xl p-5 text-center"><p className="text-orange-400/60 text-[11px] font-semibold uppercase tracking-wider">Total Mensuel</p><p className="text-orange-300 text-[28px] font-extrabold mt-1">€{totalPlanEUR.toFixed(2)}</p></div>
+    {planned.length===0?<div className="text-center py-12 bg-white/[0.02] rounded-2xl border border-dashed border-white/[0.08]"><CalendarClock size={36}className="mx-auto text-white/15 mb-3"/><p className="text-white/30 text-[13px]">Aucune dépense prévue</p></div>:
+    <div className="space-y-3">{planned.map(p=>{const pc=pCats.find(c=>c.id===p.category)||{emoji:"📌",label:p.name,color:"#6b7280"};const pacc=accounts.find(a=>a.id===p.accountId);return(<div key={p.id}className="bg-white/[0.025] border border-white/[0.06] rounded-2xl p-4"><div className="flex items-center gap-3"><div className="w-11 h-11 rounded-xl flex items-center justify-center text-[18px]"style={{background:pc.color+"18"}}>{pc.emoji}</div><div className="flex-1 min-w-0"><p className="text-white font-bold text-[14px] truncate">{p.name||pc.label}</p><p className="text-white/30 text-[11px] mt-0.5">{p.frequency==="monthly"?"Mensuel":p.frequency==="yearly"?"Annuel":"Hebdo"}{pacc?` · ${pacc.name}`:""}{p.dueDate?` · ${p.dueDate}`:""}</p>{p.note&&<p className="text-white/20 text-[11px] mt-1">{p.note}</p>}</div><p className="text-orange-400 font-extrabold text-[15px] flex-shrink-0">{fmt(p.amount,p.currency)}</p></div><div className="flex gap-2 mt-3 ml-[56px]"><button onClick={()=>{setEditPlanned(p);setPlanForm({name:p.name,category:p.category,amount:String(p.amount),currency:p.currency,frequency:p.frequency,dueDate:p.dueDate||"",accountId:p.accountId||"",note:p.note||""});setShowAddPlanned(true)}}className="text-[11px] text-white/30 font-semibold">Modifier</button><span className="text-white/10">·</span><button onClick={()=>delPlan(p.id)}className="text-[11px] text-red-400/50 font-semibold">Supprimer</button></div></div>)})}</div>}
+  </div>);
+
+  // ══ TRANSACTIONS ══
+  const renderTx=()=>(<div className="space-y-4">
+    <div className="flex items-center justify-between"><h1 className="text-[22px] font-extrabold text-white tracking-tight">Transactions</h1><div className="flex gap-2"><button onClick={()=>setShowCSV(true)}className="w-10 h-10 rounded-xl bg-white/[0.04] border border-white/[0.06] flex items-center justify-center text-white/40 active:scale-90 transition"><Upload size={16}/></button><button onClick={()=>{setTxType("expense");setShowAddTx(true)}}className="w-10 h-10 rounded-xl bg-red-500/15 border border-red-500/20 flex items-center justify-center text-red-400 active:scale-90 transition"><Minus size={18}/></button><button onClick={()=>{setTxType("income");setShowAddTx(true)}}className="w-10 h-10 rounded-xl bg-emerald-500/15 border border-emerald-500/20 flex items-center justify-center text-emerald-400 active:scale-90 transition"><Plus size={18}/></button></div></div>
+    <div className="flex gap-2 overflow-x-auto pb-1"style={{scrollbarWidth:"none"}}><button onClick={()=>setTxAccF("all")}className={`flex-shrink-0 px-4 py-2 rounded-xl text-[12px] font-bold transition ${txAccF==="all"?"bg-emerald-500/20 text-emerald-400 border border-emerald-500/30":"bg-white/[0.04] text-white/40 border border-white/[0.06]"}`}>Tous</button>{accounts.map(a=><button key={a.id}onClick={()=>setTxAccF(a.id)}className={`flex-shrink-0 px-4 py-2 rounded-xl text-[12px] font-bold transition ${txAccF===a.id?"bg-emerald-500/20 text-emerald-400 border border-emerald-500/30":"bg-white/[0.04] text-white/40 border border-white/[0.06]"}`}>{a.name}</button>)}</div>
+    <div className="flex gap-2"><div className="flex-1 relative"><Search size={16}className="absolute left-3.5 top-1/2 -translate-y-1/2 text-white/25"/><input value={txSearch}onChange={e=>setTxSearch(e.target.value)}placeholder="Rechercher..."className="w-full bg-white/[0.04] border border-white/[0.06] rounded-xl pl-10 pr-4 py-3 text-[13px] text-white placeholder:text-white/20 focus:outline-none transition"/></div><select value={txTypeF}onChange={e=>setTxTypeF(e.target.value)}className="bg-white/[0.04] border border-white/[0.06] rounded-xl px-3 py-3 text-[12px] text-white/60 appearance-none focus:outline-none pr-7"style={{backgroundImage:`url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='rgba(255,255,255,0.3)' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`,backgroundRepeat:"no-repeat",backgroundPosition:"right 10px center"}}><option value="all"style={{background:"#1a1d23"}}>Tout</option><option value="expense"style={{background:"#1a1d23"}}>Dépenses</option><option value="income"style={{background:"#1a1d23"}}>Revenus</option><option value="transfer"style={{background:"#1a1d23"}}>Transferts</option></select></div>
+    <div className="bg-white/[0.025] border border-white/[0.06] rounded-2xl px-4">{recentTx.slice(0,50).map(tx=><TxRow key={tx.id}tx={tx}accounts={accounts}eCats={eCats}iCats={iCats}onDelete={delTx}/>)}{recentTx.length===0&&<div className="py-12 text-center"><ArrowUpDown size={32}className="mx-auto text-white/10 mb-3"/><p className="text-white/25 text-[13px]">Aucune transaction</p></div>}</div>
+  </div>);
+
+  // ══ STATS ══
+  const renderStats=()=>{const sI=filtTx.filter(t=>t.type==="income").reduce((s,t)=>s+toEUR(t.amount,t.currency||"EUR",rates),0);const sE=filtTx.filter(t=>t.type==="expense").reduce((s,t)=>s+toEUR(t.amount,t.currency||"EUR",rates),0);return(<div className="space-y-5">
+    <h1 className="text-[22px] font-extrabold text-white tracking-tight">Statistiques</h1>
+    <div className="flex gap-2 overflow-x-auto pb-1"style={{scrollbarWidth:"none"}}><button onClick={()=>setStatsAccId("all")}className={`flex-shrink-0 px-4 py-2 rounded-xl text-[12px] font-bold transition ${statsAccId==="all"?"bg-emerald-500/20 text-emerald-400 border border-emerald-500/30":"bg-white/[0.04] text-white/40 border border-white/[0.06]"}`}>Tous</button>{accounts.map(a=><button key={a.id}onClick={()=>setStatsAccId(a.id)}className={`flex-shrink-0 px-4 py-2 rounded-xl text-[12px] font-bold transition ${statsAccId===a.id?"bg-emerald-500/20 text-emerald-400 border border-emerald-500/30":"bg-white/[0.04] text-white/40 border border-white/[0.06]"}`}>{a.name}</button>)}</div>
+    <Tabs active={statsPeriod}onChange={setStatsPeriod}tabs={[{id:"day",label:"Jour"},{id:"week",label:"Semaine"},{id:"month",label:"Mois"}]}/>
+    <div className="grid grid-cols-2 gap-3"><div className="bg-emerald-500/8 border border-emerald-500/10 rounded-2xl p-4"><p className="text-emerald-400/60 text-[10px] font-bold uppercase">Revenus</p><p className="text-emerald-300 text-[22px] font-extrabold mt-1">€{sI.toFixed(0)}</p></div><div className="bg-red-500/8 border border-red-500/10 rounded-2xl p-4"><p className="text-red-400/60 text-[10px] font-bold uppercase">Dépenses</p><p className="text-red-300 text-[22px] font-extrabold mt-1">€{sE.toFixed(0)}</p></div></div>
+    {mChart.some(d=>d.Revenus>0||d["Dépenses"]>0)&&<div className="bg-white/[0.025] border border-white/[0.06] rounded-2xl p-5"><h3 className="text-[14px] font-bold text-white mb-4">Revenus vs Dépenses</h3><div style={{height:200}}><ResponsiveContainer width="100%"height="100%"><BarChart data={mChart}barGap={4}><CartesianGrid strokeDasharray="3 3"stroke="rgba(255,255,255,0.04)"/><XAxis dataKey="month"tick={{fill:"rgba(255,255,255,0.3)",fontSize:11}}axisLine={false}tickLine={false}/><YAxis tick={{fill:"rgba(255,255,255,0.25)",fontSize:10}}axisLine={false}tickLine={false}width={45}tickFormatter={v=>`€${v>=1000?(v/1000).toFixed(0)+"k":v}`}/><Tooltip contentStyle={{background:"#1e2028",border:"1px solid rgba(255,255,255,0.08)",borderRadius:14,color:"#fff",fontSize:12}}/><Bar dataKey="Revenus"fill="#10b981"radius={[6,6,0,0]}maxBarSize={28}/><Bar dataKey="Dépenses"fill="#ef4444"radius={[6,6,0,0]}maxBarSize={28}/></BarChart></ResponsiveContainer></div></div>}
+    {balOT.length>1&&statsAccId==="all"&&<div className="bg-white/[0.025] border border-white/[0.06] rounded-2xl p-5"><h3 className="text-[14px] font-bold text-white mb-4">Évolution du Solde</h3><div style={{height:180}}><ResponsiveContainer width="100%"height="100%"><AreaChart data={balOT}><defs><linearGradient id="bG"x1="0"y1="0"x2="0"y2="1"><stop offset="0%"stopColor="#10b981"stopOpacity={0.25}/><stop offset="100%"stopColor="#10b981"stopOpacity={0}/></linearGradient></defs><CartesianGrid strokeDasharray="3 3"stroke="rgba(255,255,255,0.04)"/><XAxis dataKey="date"tick={{fill:"rgba(255,255,255,0.25)",fontSize:10}}tickFormatter={d=>d.slice(5)}axisLine={false}tickLine={false}/><YAxis tick={{fill:"rgba(255,255,255,0.25)",fontSize:10}}axisLine={false}tickLine={false}width={45}/><Tooltip contentStyle={{background:"#1e2028",border:"1px solid rgba(255,255,255,0.08)",borderRadius:14,color:"#fff",fontSize:12}}formatter={v=>[`€${v}`,"Solde"]}/><Area type="monotone"dataKey="solde"stroke="#10b981"strokeWidth={2.5}fill="url(#bG)"dot={false}/></AreaChart></ResponsiveContainer></div></div>}
+    {catBreak.length>0&&<div className="bg-white/[0.025] border border-white/[0.06] rounded-2xl p-5"><h3 className="text-[14px] font-bold text-white mb-4">Par Catégorie</h3><div className="space-y-3">{catBreak.map(c=>{const tot=catBreak.reduce((s,x)=>s+x.total,0);const pct=tot>0?(c.total/tot*100):0;return(<div key={c.id}className="flex items-center gap-3"><div className="w-9 h-9 rounded-lg flex items-center justify-center text-[16px]"style={{background:c.color+"18"}}>{c.emoji}</div><div className="flex-1"><div className="flex justify-between mb-1"><span className="text-[12px] text-white">{c.label}</span><span className="text-[12px] text-white font-bold">€{c.total.toFixed(0)}</span></div><div className="w-full h-1.5 bg-white/[0.05] rounded-full overflow-hidden"><div className="h-full rounded-full"style={{width:`${pct}%`,background:c.color}}/></div></div><span className="text-[11px] text-white/30 w-8 text-right">{pct.toFixed(0)}%</span></div>)})}</div></div>}
+  </div>)};
+
+  // ══ SETTINGS ══
+  const renderSettings=()=>(<div className="space-y-5">
+    <h1 className="text-[22px] font-extrabold text-white tracking-tight">Réglages</h1>
+    <div className="bg-white/[0.025] border border-white/[0.06] rounded-2xl overflow-hidden divide-y divide-white/[0.04]"><div className="p-4 flex items-center gap-3"><div className="w-9 h-9 rounded-xl bg-blue-500/15 flex items-center justify-center"><ArrowUpDown size={16}className="text-blue-400"/></div><div className="flex-1"><p className="text-white font-semibold text-[13px]">Taux de change</p><p className="text-white/30 text-[11px] mt-0.5">1€ = {rates.USD?.toFixed(2)}$ · 1€ = {rates.MUR?.toFixed(1)}Rs</p></div></div><div className="p-4 flex items-center gap-3"><div className="w-9 h-9 rounded-xl bg-emerald-500/15 flex items-center justify-center"><Wallet size={16}className="text-emerald-400"/></div><div className="flex-1"><p className="text-white font-semibold text-[13px]">{accounts.length} comptes · {transactions.length} transactions</p><p className="text-white/30 text-[11px] mt-0.5">{assets.length} biens · {planned.length} dépenses prévues</p></div></div></div>
+    <div className="bg-white/[0.025] border border-white/[0.06] rounded-2xl p-5"><div className="flex items-center justify-between mb-4"><h3 className="text-[14px] font-bold text-white">Catégories Personnalisées</h3><button onClick={()=>{setCatForm({name:"",emoji:"📌",color:RCOLORS[Math.floor(Math.random()*RCOLORS.length)]});setShowAddCat(true)}}className="flex items-center gap-1 text-emerald-400 text-[12px] font-bold"><CirclePlus size={14}/>Créer</button></div>{custExpCats.length===0&&custIncCats.length===0?<p className="text-white/25 text-[12px] text-center py-3">Aucune catégorie personnalisée</p>:<div className="flex flex-wrap gap-2">{[...custExpCats,...custIncCats].map(c=>(<span key={c.id}className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold"style={{background:c.color+"18",color:c.color}}>{c.emoji} {c.label}<button onClick={()=>{if(c.catType==="expense")setCustExpCats(custExpCats.filter(x=>x.id!==c.id));else setCustIncCats(custIncCats.filter(x=>x.id!==c.id));dbDel("categories",c.id).catch(()=>{})}}className="ml-1 opacity-50"><X size={10}/></button></span>))}</div>}</div>
+    <div className="bg-white/[0.025] border border-white/[0.06] rounded-2xl p-5"><h3 className="text-[14px] font-bold text-white mb-3">Importer CSV</h3><p className="text-white/30 text-[12px] mb-4">Format: date;description;montant</p><Btn variant="secondary"onClick={()=>setShowCSV(true)}><Upload size={15}/>Importer un fichier CSV</Btn></div>
+    <div className="pt-2"><Btn variant="danger"onClick={()=>{if(confirm("Supprimer toutes les données?")){setAccounts([]);setTx([]);setAssets([]);setPlanned([]);setCustExpCats([]);setCustIncCats([]);indexedDB.deleteDatabase(DB_NAME)}}}><Trash2 size={15}/>Réinitialiser</Btn></div><p className="text-center text-white/15 text-[11px] pb-4">BudgetApp v3.0 · PWA</p>
+  </div>);
+
+  return(<div className="min-h-screen text-white"style={{background:"#0c0e14",fontFamily:"'Plus Jakarta Sans','DM Sans',-apple-system,sans-serif"}}>
+    <style>{`@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');@keyframes slideUp{from{transform:translateY(100%);opacity:0}to{transform:translateY(0);opacity:1}}*{-webkit-tap-highlight-color:transparent;box-sizing:border-box}::-webkit-scrollbar{width:0;height:0}input[type=number]::-webkit-inner-spin-button,input[type=number]::-webkit-outer-spin-button{-webkit-appearance:none}body{margin:0;background:#0c0e14}`}</style>
+
+    <header className="sticky top-0 z-30 backdrop-blur-2xl border-b border-white/[0.04]"style={{background:"rgba(12,14,20,0.85)"}}><div className="flex items-center justify-between max-w-lg mx-auto px-5 py-3"><div className="flex items-center gap-2.5"><div className="w-9 h-9 rounded-xl flex items-center justify-center shadow-lg"style={{background:"linear-gradient(135deg,#10b981,#059669)",boxShadow:"0 4px 16px rgba(16,185,129,0.2)"}}><Wallet size={17}className="text-white"/></div><span className="font-extrabold text-[17px] tracking-tight">BudgetApp</span></div><span className="text-white/25 text-[11px] font-semibold">{new Date().toLocaleDateString("fr-FR",{day:"numeric",month:"short",year:"numeric"})}</span></div></header>
+
+    <main className="max-w-lg mx-auto px-5 py-5 pb-32">
+      {subPage==="accounts"&&renderAccList()}
+      {subPage==="accDetail"&&renderAccDetail()}
+      {subPage==="assets"&&renderAssets()}
+      {subPage==="planned"&&renderPlanned()}
+      {!subPage&&page==="home"&&renderHome()}
+      {!subPage&&page==="transactions"&&renderTx()}
+      {!subPage&&page==="stats"&&renderStats()}
+      {!subPage&&page==="settings"&&renderSettings()}
+    </main>
+
+    {!subPage&&<button onClick={()=>{setTxType("expense");setShowAddTx(true)}}className="fixed z-40 w-[54px] h-[54px] rounded-full flex items-center justify-center shadow-2xl active:scale-90 transition-all"style={{background:"linear-gradient(135deg,#10b981,#059669)",boxShadow:"0 8px 32px rgba(16,185,129,0.35)",right:20,bottom:90}}><Plus size={24}className="text-white"strokeWidth={2.5}/></button>}
+
+    <nav className="fixed bottom-0 left-0 right-0 z-30 backdrop-blur-2xl border-t border-white/[0.04]"style={{background:"rgba(12,14,20,0.92)",paddingBottom:"env(safe-area-inset-bottom)"}}><div className="flex max-w-lg mx-auto">{[{id:"home",Icon:LayoutDashboard,label:"Accueil"},{id:"transactions",Icon:ArrowUpDown,label:"Transactions"},{id:"stats",Icon:PieChart,label:"Stats"},{id:"settings",Icon:Settings,label:"Réglages"}].map(it=>(<button key={it.id}onClick={()=>{setPage(it.id);setSubPage(null)}}className={`flex-1 flex flex-col items-center gap-1 py-3 transition-all ${page===it.id&&!subPage?"text-emerald-400":"text-white/20"}`}><it.Icon size={21}strokeWidth={page===it.id&&!subPage?2.2:1.5}/><span className="text-[10px] font-semibold">{it.label}</span>{page===it.id&&!subPage&&<div className="w-4 h-0.5 rounded-full bg-emerald-400 mt-0.5"/>}</button>))}</div></nav>
+
+    {/* MODALS */}
+    <Modal open={showAddAcc}onClose={()=>{setShowAddAcc(false);setEditAcc(null)}}title={editAcc?"Modifier le Compte":"Nouveau Compte"}><Inp label="Nom"placeholder="Ex: Compte courant"value={accForm.name}onChange={e=>setAccForm({...accForm,name:e.target.value})}/><Sel label="Type"value={accForm.type}onChange={e=>setAccForm({...accForm,type:e.target.value})}options={ACCOUNT_TYPES.map(t=>({value:t.id,label:t.label}))}/><Sel label="Devise"value={accForm.currency}onChange={e=>setAccForm({...accForm,currency:e.target.value})}options={Object.entries(CURRENCIES).map(([k,v])=>({value:k,label:`${k} (${v})`}))}/><Inp label="Solde initial"type="number"step="0.01"placeholder="0.00"value={accForm.balance}onChange={e=>setAccForm({...accForm,balance:e.target.value})}/><div className="mt-2"><Btn onClick={saveAcc}><Check size={17}/>{editAcc?"Enregistrer":"Créer"}</Btn></div></Modal>
+
+    <Modal open={showAddTx}onClose={()=>{setShowAddTx(false);setScanRes(null)}}title={txType==="income"?"Nouveau Revenu":"Nouvelle Dépense"}>
+      <Tabs active={txType}onChange={setTxType}tabs={[{id:"expense",label:"Dépense"},{id:"income",label:"Revenu"}]}/>
+      <div className="mb-4"><label className="block text-[11px] font-semibold text-white/40 uppercase tracking-[0.08em] mb-2">Montant & Devise</label><div className="flex gap-2"><input type="number"step="0.01"placeholder="0.00"value={txForm.amount}onChange={e=>setTxForm({...txForm,amount:e.target.value})}className="flex-1 bg-white/[0.04] border border-white/[0.08] rounded-2xl px-4 py-[14px] text-white text-[26px] font-extrabold placeholder:text-white/15 focus:outline-none focus:border-emerald-500/40 transition"/><div className="flex bg-white/[0.04] border border-white/[0.06] rounded-2xl overflow-hidden">{Object.entries(CURRENCIES).map(([c,s])=>(<button key={c}type="button"onClick={()=>setTxForm({...txForm,currency:c})}className={`px-3.5 py-3 text-[13px] font-bold transition ${txForm.currency===c?"bg-emerald-500/20 text-emerald-400":"text-white/30"}`}>{s}</button>))}</div></div></div>
+      <div className="mb-4"><div className="flex items-center justify-between mb-2"><label className="text-[11px] font-semibold text-white/40 uppercase tracking-[0.08em]">Catégorie</label><button onClick={()=>{setNewCatType(txType);setShowAddCat(true)}}className="text-[11px] text-emerald-400 font-bold flex items-center gap-1"><CirclePlus size={12}/>Créer</button></div><div className="grid grid-cols-5 gap-2">{(txType==="expense"?eCats:iCats).map(c=>(<button key={c.id}onClick={()=>setTxForm({...txForm,category:c.id})}className={`flex flex-col items-center gap-1.5 p-2.5 rounded-xl border transition active:scale-95 ${txForm.category===c.id?"border-emerald-500/40 bg-emerald-500/10":"border-white/[0.06] bg-white/[0.02]"}`}><span className="text-[17px]">{c.emoji}</span><span className="text-[8px] text-white/40 leading-tight font-medium">{c.label}</span></button>))}</div></div>
+      <Sel label="Compte"value={txForm.accountId}onChange={e=>{const a=accounts.find(x=>x.id===e.target.value);setTxForm({...txForm,accountId:e.target.value,currency:a?a.currency:txForm.currency})}}options={[{value:"",label:"Sélectionner..."},...accounts.map(a=>({value:a.id,label:`${a.name} (${a.currency})`}))]}/>
+      <Inp label="Date"type="date"value={txForm.date}onChange={e=>setTxForm({...txForm,date:e.target.value})}/><Inp label="Note"placeholder="Description..."value={txForm.note}onChange={e=>setTxForm({...txForm,note:e.target.value})}/>
+      <Sel label="Récurrence"value={txForm.recurring}onChange={e=>setTxForm({...txForm,recurring:e.target.value})}options={[{value:"none",label:"Aucune"},{value:"weekly",label:"Hebdomadaire"},{value:"monthly",label:"Mensuelle"}]}/>
+      <div className="mt-2"><Btn onClick={saveTx}disabled={!txForm.amount||!txForm.accountId}><Check size={17}/>Enregistrer</Btn></div>
+    </Modal>
+
+    <Modal open={showTransfer}onClose={()=>setShowTransfer(false)}title="Transfert entre Comptes">
+      <Sel label="Compte source"value={trForm.fromAccountId}onChange={e=>setTrForm({...trForm,fromAccountId:e.target.value})}options={[{value:"",label:"Sélectionner..."},...accounts.map(a=>({value:a.id,label:`${a.name} (${fmt(getBal(a),a.currency)})`}))]}/>
+      <div className="flex justify-center my-2"><div className="w-10 h-10 rounded-full bg-blue-500/15 flex items-center justify-center"><ArrowLeftRight size={18}className="text-blue-400"/></div></div>
+      <Sel label="Compte destination"value={trForm.toAccountId}onChange={e=>setTrForm({...trForm,toAccountId:e.target.value})}options={[{value:"",label:"Sélectionner..."},...accounts.filter(a=>a.id!==trForm.fromAccountId).map(a=>({value:a.id,label:`${a.name} (${a.currency})`}))]}/>
+      <Inp label="Montant"type="number"step="0.01"placeholder="0.00"value={trForm.amount}onChange={e=>setTrForm({...trForm,amount:e.target.value})}className="text-[22px] font-extrabold"/>
+      <Inp label="Date"type="date"value={trForm.date}onChange={e=>setTrForm({...trForm,date:e.target.value})}/><Inp label="Note"placeholder="Motif..."value={trForm.note}onChange={e=>setTrForm({...trForm,note:e.target.value})}/>
+      <div className="mt-2"><Btn onClick={saveTr}disabled={!trForm.fromAccountId||!trForm.toAccountId||!trForm.amount}><ArrowLeftRight size={17}/>Transférer</Btn></div>
+    </Modal>
+
+    <Modal open={showAddAsset}onClose={()=>{setShowAddAsset(false);setEditAsset(null)}}title={editAsset?"Modifier le Bien":"Nouveau Bien"}>
+      <Inp label="Nom"placeholder="Ex: Appartement"value={assetForm.name}onChange={e=>setAssetForm({...assetForm,name:e.target.value})}/>
+      <Sel label="Type"value={assetForm.type}onChange={e=>setAssetForm({...assetForm,type:e.target.value})}options={ASSET_TYPES.map(t=>({value:t.id,label:`${t.emoji} ${t.label}`}))}/>
+      <div className="mb-4"><label className="block text-[11px] font-semibold text-white/40 uppercase tracking-[0.08em] mb-2">Valeur & Devise</label><div className="flex gap-2"><input type="number"step="0.01"placeholder="0.00"value={assetForm.value}onChange={e=>setAssetForm({...assetForm,value:e.target.value})}className="flex-1 bg-white/[0.04] border border-white/[0.08] rounded-2xl px-4 py-[14px] text-white text-[20px] font-extrabold placeholder:text-white/15 focus:outline-none transition"/><div className="flex bg-white/[0.04] border border-white/[0.06] rounded-2xl overflow-hidden">{Object.entries(CURRENCIES).map(([c,s])=>(<button key={c}type="button"onClick={()=>setAssetForm({...assetForm,currency:c})}className={`px-3 py-3 text-[13px] font-bold transition ${assetForm.currency===c?"bg-emerald-500/20 text-emerald-400":"text-white/30"}`}>{s}</button>))}</div></div></div>
+      <Inp label="Date d'achat"type="date"value={assetForm.purchaseDate}onChange={e=>setAssetForm({...assetForm,purchaseDate:e.target.value})}/>
+      <div className="mb-4"><label className="block text-[11px] font-semibold text-white/40 uppercase tracking-[0.08em] mb-2">Description</label><textarea value={assetForm.description}onChange={e=>setAssetForm({...assetForm,description:e.target.value})}placeholder="Détails..."className="w-full bg-white/[0.04] border border-white/[0.08] rounded-2xl px-4 py-3 text-white placeholder:text-white/20 focus:outline-none transition text-[14px] h-24 resize-none"/></div>
+      <div className="mt-2"><Btn onClick={saveAsset}><Check size={17}/>{editAsset?"Enregistrer":"Ajouter"}</Btn></div>
+    </Modal>
+
+    <Modal open={showAddPlanned}onClose={()=>{setShowAddPlanned(false);setEditPlanned(null)}}title={editPlanned?"Modifier":"Nouvelle Dépense Prévue"}>
+      <Inp label="Nom"placeholder="Ex: Impôts"value={planForm.name}onChange={e=>setPlanForm({...planForm,name:e.target.value})}/>
+      <div className="mb-4"><div className="flex items-center justify-between mb-2"><label className="text-[11px] font-semibold text-white/40 uppercase tracking-[0.08em]">Catégorie</label><button onClick={()=>{setNewCatType("expense");setShowAddCat(true)}}className="text-[11px] text-emerald-400 font-bold flex items-center gap-1"><CirclePlus size={12}/>Créer</button></div><div className="grid grid-cols-4 gap-2">{pCats.map(c=>(<button key={c.id}onClick={()=>setPlanForm({...planForm,category:c.id})}className={`flex flex-col items-center gap-1 p-2 rounded-xl border transition active:scale-95 ${planForm.category===c.id?"border-orange-500/40 bg-orange-500/10":"border-white/[0.06] bg-white/[0.02]"}`}><span className="text-[16px]">{c.emoji}</span><span className="text-[8px] text-white/40 leading-tight">{c.label}</span></button>))}</div></div>
+      <div className="mb-4"><label className="block text-[11px] font-semibold text-white/40 uppercase tracking-[0.08em] mb-2">Montant & Devise</label><div className="flex gap-2"><input type="number"step="0.01"placeholder="0.00"value={planForm.amount}onChange={e=>setPlanForm({...planForm,amount:e.target.value})}className="flex-1 bg-white/[0.04] border border-white/[0.08] rounded-2xl px-4 py-[14px] text-white text-[20px] font-extrabold placeholder:text-white/15 focus:outline-none transition"/><div className="flex bg-white/[0.04] border border-white/[0.06] rounded-2xl overflow-hidden">{Object.entries(CURRENCIES).map(([c,s])=>(<button key={c}type="button"onClick={()=>setPlanForm({...planForm,currency:c})}className={`px-3 py-3 text-[13px] font-bold transition ${planForm.currency===c?"bg-orange-500/20 text-orange-400":"text-white/30"}`}>{s}</button>))}</div></div></div>
+      <Sel label="Fréquence"value={planForm.frequency}onChange={e=>setPlanForm({...planForm,frequency:e.target.value})}options={[{value:"weekly",label:"Hebdomadaire"},{value:"monthly",label:"Mensuelle"},{value:"yearly",label:"Annuelle"}]}/>
+      <Inp label="Échéance"type="date"value={planForm.dueDate}onChange={e=>setPlanForm({...planForm,dueDate:e.target.value})}/>
+      <Sel label="Compte associé"value={planForm.accountId}onChange={e=>setPlanForm({...planForm,accountId:e.target.value})}options={[{value:"",label:"Aucun"},...accounts.map(a=>({value:a.id,label:a.name}))]}/>
+      <Inp label="Note"placeholder="Détails..."value={planForm.note}onChange={e=>setPlanForm({...planForm,note:e.target.value})}/>
+      <div className="mt-2"><Btn onClick={savePlan}><Check size={17}/>{editPlanned?"Enregistrer":"Ajouter"}</Btn></div>
+    </Modal>
+
+    <Modal open={showAddCat}onClose={()=>setShowAddCat(false)}title="Nouvelle Catégorie">
+      <Tabs active={newCatType}onChange={setNewCatType}tabs={[{id:"expense",label:"Dépense"},{id:"income",label:"Revenu"}]}/>
+      <Inp label="Nom"placeholder="Ex: Voyage"value={catForm.name}onChange={e=>setCatForm({...catForm,name:e.target.value})}/>
+      <div className="mb-4"><label className="block text-[11px] font-semibold text-white/40 uppercase tracking-[0.08em] mb-2">Emoji</label><div className="flex gap-2 flex-wrap">{["📌","🍔","✈️","🎵","🏋️","🐾","💄","🎯","🏖️","🎪","🧾","💊","🎁","🔧","📊","🏠","🚗","💎","📱","🎓"].map(e=>(<button key={e}onClick={()=>setCatForm({...catForm,emoji:e})}className={`w-10 h-10 rounded-xl text-[18px] flex items-center justify-center transition ${catForm.emoji===e?"bg-emerald-500/20 border border-emerald-500/40 scale-110":"bg-white/[0.04] border border-white/[0.06]"}`}>{e}</button>))}</div></div>
+      <div className="mb-4"><label className="block text-[11px] font-semibold text-white/40 uppercase tracking-[0.08em] mb-2">Couleur</label><div className="flex gap-2 flex-wrap">{RCOLORS.map(c=>(<button key={c}onClick={()=>setCatForm({...catForm,color:c})}className={`w-8 h-8 rounded-full transition ${catForm.color===c?"ring-2 ring-white ring-offset-2 ring-offset-[#1e2028] scale-110":""}`}style={{background:c}}/>))}</div></div>
+      <div className="mt-2"><Btn onClick={saveCat}disabled={!catForm.name}><Tag size={17}/>Créer</Btn></div>
+    </Modal>
+
+    <Modal open={showCSV}onClose={()=>setShowCSV(false)}title="Importer CSV">
+      <div className="mb-4 p-4 bg-blue-500/8 border border-blue-500/15 rounded-2xl"><p className="text-blue-400 text-[12px] font-semibold mb-2">Format attendu:</p><p className="text-white/40 text-[11px] font-mono">date;description;montant</p><p className="text-white/40 text-[11px] font-mono">2026-03-01;Carrefour;-42.50</p></div>
+      <div onClick={()=>csvRef.current?.click()}className="text-center border-2 border-dashed border-white/[0.1] rounded-2xl py-10 cursor-pointer active:border-emerald-500/30 transition"><FileText size={32}className="mx-auto text-white/15 mb-3"/><p className="text-white/40 text-[13px]">Choisir un fichier CSV</p></div>
+      <input ref={csvRef}type="file"accept=".csv,.tsv,.txt"className="hidden"onChange={e=>handleCSV(e.target.files[0])}/>
+    </Modal>
+
+    <Modal open={showScan}onClose={()=>{setShowScan(false);setScanRes(null);setScanning(false)}}title="Scanner un Reçu">
+      <div onClick={()=>fileRef.current?.click()}className="text-center border-2 border-dashed border-white/[0.1] rounded-2xl py-14 cursor-pointer active:border-emerald-500/30 transition">{scanning?<div className="flex flex-col items-center gap-3"><div className="w-9 h-9 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin"/><p className="text-white/40 text-[13px]">Analyse...</p></div>:<><ScanLine size={36}className="mx-auto text-white/15 mb-3"/><p className="text-white/40 text-[13px]">Photo ou fichier image</p></>}</div>
+      <input ref={fileRef}type="file"accept="image/*"capture="environment"className="hidden"onChange={e=>handleScan(e.target.files[0])}/>
+      {scanRes&&<div className="mt-4 bg-blue-500/8 border border-blue-500/15 rounded-2xl p-5"><p className="text-blue-400 text-[10px] font-bold uppercase tracking-wider mb-3">Résultat OCR</p><div className="grid grid-cols-2 gap-4 mb-3"><div><p className="text-white/35 text-[11px]">Montant</p><p className="text-white text-[22px] font-extrabold">€{scanRes.amount}</p></div><div><p className="text-white/35 text-[11px]">Date</p><p className="text-white text-[14px] font-bold mt-1">{scanRes.date}</p></div></div><Btn onClick={()=>{setTxType("expense");setTxForm(f=>({...f,amount:scanRes.amount,date:scanRes.date}));setShowScan(false);setShowAddTx(true);setScanRes(null)}}><Check size={15}/>Vérifier et Valider</Btn></div>}
+    </Modal>
+  </div>)}
